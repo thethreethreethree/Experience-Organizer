@@ -1,0 +1,24 @@
+{
+  "name": "experience-organizer",
+  "version": "1.0.0",
+  "description": "Organize experience based (day,midday, or nightime) activities.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thethreethreethree/Experience-Organizer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/thethreethreethree/Experience-Organizer/issues"
+  },
+  "homepage": "https://github.com/thethreethreethree/Experience-Organizer#readme",
+  "dependencies": {
+    "puppeteer-core": "^25.0.4"
+  }
+}
