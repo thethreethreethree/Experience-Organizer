@@ -12,6 +12,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
 const CHROME_CANDIDATES = [
@@ -86,8 +87,9 @@ export async function enrichCsv(text, onProgress) {
   return { csv: toCSV(rows), filled, total };
 }
 
-// ---- CLI mode ----
-if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`) {
+// ---- CLI mode ---- (robust on Windows: compare resolved file paths)
+const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (invokedDirectly) {
   const input = process.argv[2] || new URL('./data/things_to_do.csv', import.meta.url).pathname.replace(/^\//, '');
   const out = new URL('./data/things_to_do_photos.csv', import.meta.url);
   const text = await readFile(input, 'utf8');

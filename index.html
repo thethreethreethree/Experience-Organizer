@@ -279,10 +279,15 @@ function render(){
 function isRealPhoto(url){
   return /lh3\.googleusercontent\.com|googleusercontent\.com\/gps-cs-s/.test(url||'');
 }
-// No-key fallback: OpenStreetMap static map thumbnail from lat/long.
+// No-key fallback: a single OpenStreetMap map tile computed from lat/long.
 function osmStaticMap(lat,lon){
-  if(!lat||!lon) return '';
-  return `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lon}&zoom=16&size=400x180&markers=${lat},${lon},lightblue1`;
+  lat=parseFloat(lat); lon=parseFloat(lon);
+  if(!isFinite(lat)||!isFinite(lon)) return '';
+  const z=15, n=Math.pow(2,z);
+  const x=Math.floor((lon+180)/360*n);
+  const latRad=lat*Math.PI/180;
+  const y=Math.floor((1-Math.log(Math.tan(latRad)+1/Math.cos(latRad))/Math.PI)/2*n);
+  return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
 }
 function imageFor(r){
   if(isRealPhoto(r['Image'])) return r['Image'];
@@ -294,8 +299,12 @@ function card(r){
   const site=r['Website']?`<a href="${r['Website']}" target="_blank">Site</a>`:'';
   const img=imageFor(r);
   const fallback=osmStaticMap(r['Latitude'],r['Longitude']);
+  // On load error: try the map tile once; if that also fails (or none), hide the image.
+  const onerr = fallback && img!==fallback
+    ? `this.onerror=function(){this.style.display='none'};this.src='${escapeHTML(fallback)}';`
+    : `this.onerror=null;this.style.display='none';`;
   const imgHTML=img
-    ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" onerror="this.onerror=null;this.src='${escapeHTML(fallback)}';if(!'${fallback}')this.style.display='none';">`
+    ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" onerror="${onerr}">`
     : '';
   return `<div class="card">
     ${imgHTML}
@@ -344,7 +353,18 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
   const status=document.getElementById('photoStatus');
   const btn=document.getElementById('photoBtn');
   status.style.display='block';
-  status.textContent='Launching Chrome and fetching photos... this can take a few minutes. Watch the server console for progress.';
+  // Guard 1: must be served by the local server, not opened as a file.
+  if(location.protocol==='file:'){
+    status.textContent='Photos need the local server. Double-click start.bat, then open http://localhost:8000 (not the file directly).';
+    return;
+  }
+  // Guard 2: the CSV must actually have Google Maps Links to look photos up.
+  const linksCount=DATA.filter(r=>(r['Google Maps Link']||'').includes('google.com/maps')).length;
+  if(linksCount===0){
+    status.textContent='This CSV has no "Google Maps Link" data, so there is nothing to fetch photos from. Drag & drop your exported things_to_do_categorized.csv (it includes the links).';
+    return;
+  }
+  status.textContent=`Launching Chrome and fetching photos for ${linksCount} places... this can take a few minutes (~2s each). Watch the server console for progress. Do NOT refresh.`;
   btn.disabled=true; btn.style.opacity='.6';
   try{
     const res=await fetch('/scrape',{method:'POST',headers:{'Content-Type':'text/csv'},body:LAST_CSV});
