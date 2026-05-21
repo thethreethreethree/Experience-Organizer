@@ -14,16 +14,12 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import puppeteer from 'puppeteer-core';
 
-const INPUT = process.argv[2] || new URL('./data/things_to_do.csv', import.meta.url).pathname.replace(/^\//, '');
-const OUT = new URL('./data/things_to_do_photos.csv', import.meta.url);
-
 const CHROME_CANDIDATES = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
 ];
-const chromePath = CHROME_CANDIDATES.find(p => existsSync(p));
-if (!chromePath) { console.error('No Chrome/Edge found. Edit CHROME_CANDIDATES.'); process.exit(1); }
+export function findChrome() { return CHROME_CANDIDATES.find(p => existsSync(p)); }
 
 // ---- minimal CSV parse/serialize ----
 function parseCSV(text) {
@@ -40,59 +36,63 @@ const csvField = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v
 const toCSV = rows => rows.map(r => r.map(csvField).join(',')).join('\n');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const text = await readFile(INPUT, 'utf8');
-const rows = parseCSV(text);
-const headers = rows[0];
-const linkIdx = headers.indexOf('Google Maps Link');
-const imgIdx = headers.indexOf('Image');
-const titleIdx = headers.indexOf('Title');
-if (linkIdx < 0 || imgIdx < 0) { console.error('CSV missing "Image" or "Google Maps Link" column'); process.exit(1); }
+// Enrich CSV text -> { csv, filled, total }. onProgress(title, ok, idx, total) optional.
+export async function enrichCsv(text, onProgress) {
+  const chromePath = findChrome();
+  if (!chromePath) throw new Error('No Chrome/Edge found. Edit CHROME_CANDIDATES in scrape-photos.mjs.');
+  const rows = parseCSV(text);
+  const headers = rows[0];
+  const linkIdx = headers.indexOf('Google Maps Link');
+  const imgIdx = headers.indexOf('Image');
+  const titleIdx = headers.indexOf('Title');
+  if (linkIdx < 0 || imgIdx < 0) throw new Error('CSV missing "Image" or "Google Maps Link" column');
 
-const browser = await puppeteer.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox', '--lang=en-US'] });
-const page = await browser.newPage();
-await page.setViewport({ width: 1280, height: 900 });
-// Dismiss EU consent if it appears
-async function acceptConsent() {
-  try {
-    const btn = await page.$('button[aria-label*="Accept"], form[action*="consent"] button');
-    if (btn) { await btn.click(); await sleep(1500); }
-  } catch {}
-}
+  const browser = await puppeteer.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox', '--lang=en-US'] });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 900 });
+  const acceptConsent = async () => {
+    try {
+      const btn = await page.$('button[aria-label*="Accept"], form[action*="consent"] button');
+      if (btn) { await btn.click(); await sleep(1500); }
+    } catch {}
+  };
 
-let filled = 0;
-for (let i = 1; i < rows.length; i++) {
-  const r = rows[i];
-  if (!r || r.length <= linkIdx) continue;
-  const link = r[linkIdx];
-  const title = r[titleIdx] || `row ${i}`;
-  if (!link) { console.log(`· ${title}: no maps link`); continue; }
-
-  try {
-    await page.goto(link, { waitUntil: 'networkidle2', timeout: 45000 });
-    await acceptConsent();
-    // Wait for the hero photo button that holds the real image.
-    await page.waitForSelector('img', { timeout: 15000 }).catch(() => {});
-    await sleep(1200);
-    const photo = await page.evaluate(() => {
-      const imgs = [...document.querySelectorAll('img')].map(i => i.src).filter(Boolean);
-      // Real place photos are served from googleusercontent (gps-cs / lh3..lh6).
-      const real = imgs.find(s => /googleusercontent\.com\/(gps-cs|p\/|proxy)/.test(s) || /lh[3-6]\.googleusercontent\.com/.test(s));
-      return real || '';
-    });
-    if (photo && !photo.includes('default_user')) {
-      r[imgIdx] = photo;
-      filled++;
-      console.log(`✓ ${title}`);
-    } else {
-      console.log(`· ${title}: no photo found (kept existing)`);
+  let filled = 0;
+  const total = rows.length - 1;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || r.length <= linkIdx) continue;
+    const link = r[linkIdx];
+    const title = r[titleIdx] || `row ${i}`;
+    let ok = false;
+    if (link) {
+      try {
+        await page.goto(link, { waitUntil: 'networkidle2', timeout: 45000 });
+        await acceptConsent();
+        await page.waitForSelector('img', { timeout: 15000 }).catch(() => {});
+        await sleep(1200);
+        const photo = await page.evaluate(() => {
+          const imgs = [...document.querySelectorAll('img')].map(i => i.src).filter(Boolean);
+          const real = imgs.find(s => /googleusercontent\.com\/(gps-cs|p\/|proxy)/.test(s) || /lh[3-6]\.googleusercontent\.com/.test(s));
+          return real || '';
+        });
+        if (photo && !photo.includes('default_user')) { r[imgIdx] = photo; filled++; ok = true; }
+      } catch {}
     }
-  } catch (e) {
-    console.log(`✗ ${title}: ${e.message.split('\n')[0]}`);
+    if (onProgress) onProgress(title, ok, i, total);
+    await sleep(800);
   }
-  await sleep(800);
+  await browser.close();
+  return { csv: toCSV(rows), filled, total };
 }
 
-await browser.close();
-await writeFile(OUT, toCSV(rows), 'utf8');
-console.log(`\nDone. Filled ${filled}/${rows.length - 1} rows.`);
-console.log(`Wrote ${OUT.pathname}`);
+// ---- CLI mode ----
+if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`) {
+  const input = process.argv[2] || new URL('./data/things_to_do.csv', import.meta.url).pathname.replace(/^\//, '');
+  const out = new URL('./data/things_to_do_photos.csv', import.meta.url);
+  const text = await readFile(input, 'utf8');
+  const { csv, filled, total } = await enrichCsv(text, (title, ok) => console.log(`${ok ? '✓' : '·'} ${title}`));
+  await writeFile(out, csv, 'utf8');
+  console.log(`\nDone. Filled ${filled}/${total} rows.`);
+  console.log(`Wrote ${out.pathname}`);
+}
