@@ -32,6 +32,7 @@
   .col.day h2{color:var(--day)} .col.mid h2{color:var(--mid)} .col.night h2{color:var(--night)}
   .col h2 .count{background:rgba(255,255,255,.06);padding:2px 8px;border-radius:999px;font-size:12px;color:var(--muted);font-weight:400}
   .card{padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px;background:#111419}
+  .card .thumb{width:100%;height:140px;object-fit:cover;border-radius:6px;margin-bottom:8px;background:#0c0e12;display:block}
   .card .t{font-weight:600;font-size:14px;line-height:1.3}
   .card .ty{color:var(--muted);font-size:11px;margin:2px 0 6px}
   .card .d{font-size:12px;color:#c4c9d6;line-height:1.4}
@@ -78,6 +79,8 @@
     <span class="chip" data-cat="day">Daytime</span>
     <span class="chip" data-cat="mid">Midday</span>
     <span class="chip" data-cat="night">Nighttime</span>
+    <button id="askBtn" style="margin-left:auto;background:#7b2cbf;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer">Ask Claude to Reorganize</button>
+    <button id="exportBtn" style="background:var(--accent);color:#1a1408;border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer">Export CSV</button>
   </div>
 
   <div class="columns">
@@ -117,7 +120,87 @@ const DAY_KW=['sunrise','morning','hike','hiking','climb','climbing','kayak','sn
 const MID_KW=['beach','lagoon','swim','pool','beach club','island','islet','natural attraction','viewpoint','scenic','pier','beachfront','resort','hotel','hostel','b&b','bed & breakfast','vacation','wetland','reserve','rental','coworking','park','court','garden','venue'];
 const NIGHT_KW=['sunset','night','bar','cocktail','lounge','restaurant','dining','dinner','club','nightlife','wreck bar','beach bar'];
 
+// Manual overrides by Title - authoritative, beats keyword scoring
+const OVERRIDES={
+  // MORNING - sunrise hikes, gyms, yoga, cafes, watersports rentals, nature/cultural
+  'Taraw Cliff':'day','Panorama Experiences':'day','El nido Adventures 360':'day',
+  'JAYVEN KAYAK RENTAL (kayaking El nido)':'day','RMM KAYAK and Motor Rental':'day',
+  'El Nido Via Ferrata Canopy Walk':'day','Hieroglyph Fitness El Nido':'day',
+  'Home Gym':'day','Bayan Yoga':'day','Yoga Retreats El Nido':'day',
+  'Namaste El Nido':'day','Yoga Spa and Wellness at Happiness El Nido':'day',
+  'Seaborn - El Nido Freediving School':'day','Lazy Hammock Cafe':'day',
+  'Lio Wetlands':'day','E-Bahay Nature Adventure Park':'day',
+  'The Philippine Experience':'day','Mango Tiger Philippines':'day',
+  'Neighbors and Nomads Coworking':'day',
+
+  // MIDDAY - island hopping, diving, tours, beaches, hotels/resorts, daytime attractions
+  'Castaway Expeditions by Outpost Hostel El Nido':'mid','Buhay Isla Ecotour - El Nido':'mid',
+  'El Nido Tours Sea Quest - island hopping and expeditions to Coron.':'mid',
+  'Hayahay Adventures El Nido':'mid','Seatours Palawan':'mid','Discover El Nido':'mid',
+  'Tao Philippines':'mid','Apetours travel and tours':'mid','Nes Expedition Travel & Tours Agency':'mid',
+  'Bellitta Tours':'mid','We Are Juan':'mid','Senorita Travels':'mid',
+  'Go Paradise Travel and Tours (El Nido)':'mid','Lovelyn Travel And Tours':'mid',
+  'Philguru Travel & Tours':'mid','Kuya Cris Travel and Tours':'mid','Spider Travel and Tours':'mid',
+  'Jhannas travel and tours':'mid','Beachfront travel and tours':'mid',
+  'H Hospitality Travel & Tours':'mid','D Gifts Travel and Tours':'mid',
+  'The Couch El Nido Travel and Tours':'mid','Yva travel and tours':'mid',
+  'Estranghero Tours & Motorbike Rental & Laundry':'mid','Clydenike and Guenkean travel & tour':'mid',
+  'Palawena Travel and Tours & Wellness Spa':'mid','Poseidon Tours and Expeditions':'mid',
+  'Bliss El Nido':'mid','Elbyahe\'s Travel and Tours':'mid','El Nido Yachting Club':'mid',
+  'Nativ Exploration Palawan':'mid','Exoticloops Motorcycle Tours':'mid',
+  'Discover El Nido Paintball':'mid','Elnido Zipline - Palawan Zipline Adventure Inc.':'mid',
+  'Palawan Divers':'mid','200 Bar Diving Center':'mid','El Nido Adventure Scuba Dive Center':'mid',
+  'Aquanaut Dive Center':'mid','Club Paradise Divers El Nido':'mid','Turtle Divers':'mid',
+  'Submariner Diving Center':'mid','Deep Blue Dive Seafari':'mid','Tabanka Divers':'mid',
+  'Ranmarc Dive Shop and Services':'mid','The Range - Shooting Gallery':'mid',
+  'Papaya Beach':'mid','Entalula Beach':'mid','Seven Commandos Beach':'mid',
+  'Entalula Beach Club':'mid','El Nido Beach':'mid','Matinloc Island':'mid',
+  'Depeldet Island':'mid','Vanilla Beach El Nido':'mid','Corong Corong Pier':'mid',
+  'Beach View Lane':'mid','Soledad de Amor':'mid',
+  'El Nido Municipal Covered Court':'mid',
+  // Hotels / resorts / hostels / rentals
+  'The Funny Lion - El Nido':'mid','Miniloc El Nido':'mid','El Nido Resorts - Miniloc Island':'mid',
+  'Pangulasian El Nido':'mid','Seda Lio':'mid','Frangipani El Nido':'mid',
+  'Maremegmeg Beach Club':'mid','Buko Beach Resort':'mid','Lime Resort El Nido':'mid',
+  'El Nido COCO RESORT':'mid','El Nido Moringa Resort':'mid','El Nido Mahogany Beach Resort':'mid',
+  'Dolarog Beach Resort':'mid','El Nido Bayview Resort':'mid','Stunning Republic Beach Resort':'mid',
+  'Last Frontier Beach Resort - Adults Only':'mid','Colibris Corner':'mid',
+  'Isla - The Isla Experience':'mid','Forest Bay Inn El Nido':'mid','Sommer\'s Hill':'mid',
+  'Spin Designer Hostel':'mid','Outpost Beach Hostel':'mid','Big Paul Hostel - El Nido':'mid',
+  'Happiness Hostel':'mid','Amigos Hostel El Nido':'mid','Pugad Hostel El Nido Palawan':'mid',
+  'SIP Sunset Hostel and Lounge':'mid','RedDoorz @ Tandikan Beach Cottages':'mid',
+  'RedDoorz @ Island Front Cottages El Nido':'mid','Picado House':'mid',
+
+  // NIGHTTIME - sunsets, bars, lounges, nightlife
+  'Las Cabanas Beach':'night','Marimegmeg Beach':'night','Corong Corong Beach':'night',
+  'Sip Sunset Lounge & Bar':'night','Outpost Sunset Bar & Restaurant':'night',
+  'Yacht Wreck Bar':'night','Bar 147 by SPIN':'night','Zalupa beach':'night',
+  'La Plage Restaurant & Beach Bar':'night','Yaica view':'night'
+};
+
+// Normalize for fuzzy match: lowercase, strip diacritics & punctuation, collapse spaces
+function norm(s){
+  return (s||'').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[^a-z0-9]+/g,' ').trim();
+}
+const NORM_OVERRIDES={};
+Object.keys(OVERRIDES).forEach(k=>NORM_OVERRIDES[norm(k)]=OVERRIDES[k]);
+
 function categorize(row){
+  const title=(row['Title']||'').trim();
+  if(OVERRIDES[title]) return OVERRIDES[title];
+  const nt=norm(title);
+  if(NORM_OVERRIDES[nt]) return NORM_OVERRIDES[nt];
+  // Substring match: override key contained in title (or vice versa) - longest key wins
+  let best=null,bestLen=0;
+  for(const k in NORM_OVERRIDES){
+    if(k.length<6) continue;
+    if(nt.includes(k) || k.includes(nt)){
+      if(k.length>bestLen){best=NORM_OVERRIDES[k];bestLen=k.length;}
+    }
+  }
+  if(best) return best;
   const txt=((row['Title']||'')+' '+(row['Activity Type']||'')+' '+(row['Description']||'')+' '+(row['Industry']||'')+' '+(row['Amenities']||'')).toLowerCase();
   const score={day:0,mid:0,night:0};
   for(const k of NIGHT_KW) if(txt.includes(k)) score.night+=2;
@@ -178,10 +261,31 @@ function render(){
   }
 }
 
+// A row's Image is a real photo only if it's a Google user-content photo CDN link.
+// The generic "default_user.png" placeholder is treated as no photo.
+function isRealPhoto(url){
+  return /lh3\.googleusercontent\.com|googleusercontent\.com\/gps-cs-s/.test(url||'');
+}
+// No-key fallback: OpenStreetMap static map thumbnail from lat/long.
+function osmStaticMap(lat,lon){
+  if(!lat||!lon) return '';
+  return `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lon}&zoom=16&size=400x180&markers=${lat},${lon},lightblue1`;
+}
+function imageFor(r){
+  if(isRealPhoto(r['Image'])) return r['Image'];
+  return osmStaticMap(r['Latitude'],r['Longitude']);
+}
+
 function card(r){
   const map=r['Google Maps Link']?`<a href="${r['Google Maps Link']}" target="_blank">Maps</a>`:'';
   const site=r['Website']?`<a href="${r['Website']}" target="_blank">Site</a>`:'';
+  const img=imageFor(r);
+  const fallback=osmStaticMap(r['Latitude'],r['Longitude']);
+  const imgHTML=img
+    ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" onerror="this.onerror=null;this.src='${escapeHTML(fallback)}';if(!'${fallback}')this.style.display='none';">`
+    : '';
   return `<div class="card">
+    ${imgHTML}
     <div class="t">${escapeHTML(r['Title'])}</div>
     <div class="ty">${escapeHTML(r['Activity Type']||'')}</div>
     <div class="d">${escapeHTML((r['Description']||'').slice(0,180))}</div>
@@ -210,6 +314,61 @@ document.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{
   document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
   c.classList.add('active'); activeCat=c.dataset.cat; render();
 }));
+
+const CAT_LABEL={day:'MORNING',mid:'MIDDAY',night:'NIGHTTIME'};
+function csvEscape(v){v=(v==null?'':String(v));return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
+function exportCSV(){
+  if(!DATA.length) return;
+  const headers=Object.keys(DATA[0]).filter(h=>h!=='_cat');
+  const out=['Category',...headers];
+  const lines=[out.map(csvEscape).join(',')];
+  // honor current filters/sort by re-using the visible set
+  const tf=document.getElementById('typeFilter').value;
+  const q=document.getElementById('search').value.trim().toLowerCase();
+  let rows=DATA.slice();
+  if(tf) rows=rows.filter(r=>r['Activity Type']===tf);
+  if(q) rows=rows.filter(r=>(r['Title']+' '+r['Description']+' '+r['Activity Type']).toLowerCase().includes(q));
+  if(activeCat!=='all') rows=rows.filter(r=>r._cat===activeCat);
+  rows.forEach(r=>{
+    lines.push([CAT_LABEL[r._cat],...headers.map(h=>r[h])].map(csvEscape).join(','));
+  });
+  const blob=new Blob([lines.join('\n')],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download='things_to_do_categorized.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+document.getElementById('exportBtn').addEventListener('click',exportCSV);
+
+function askClaude(){
+  const label={day:'MORNING',mid:'MIDDAY',night:'NIGHTTIME'};
+  const grouped={day:[],mid:[],night:[]};
+  DATA.forEach(r=>grouped[r._cat].push(r['Title']));
+  const snapshot=
+`Here is the current Experience Organizer categorization. Please review and tell me which activities (if any) should be moved to a different category, and why.
+
+MORNING (${grouped.day.length}):
+${grouped.day.map(t=>'  - '+t).join('\n')}
+
+MIDDAY (${grouped.mid.length}):
+${grouped.mid.map(t=>'  - '+t).join('\n')}
+
+NIGHTTIME (${grouped.night.length}):
+${grouped.night.map(t=>'  - '+t).join('\n')}
+
+My change request: `;
+  navigator.clipboard.writeText(snapshot).then(()=>{
+    const btn=document.getElementById('askBtn');
+    const orig=btn.textContent;
+    btn.textContent='Copied! Opening Claude...';
+    setTimeout(()=>btn.textContent=orig,2500);
+    window.open('https://claude.ai/new','_blank');
+  }).catch(()=>{
+    alert('Could not copy. Manually open Claude and describe your change.');
+    window.open('https://claude.ai/new','_blank');
+  });
+}
+document.getElementById('askBtn').addEventListener('click',askClaude);
 
 fetch('data/things_to_do.csv').then(r=>{
   if(!r.ok) throw new Error(r.status); return r.text();
