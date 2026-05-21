@@ -239,17 +239,17 @@ function render(){
   const q=document.getElementById('search').value.trim().toLowerCase();
 
   let rows=DATA.slice();
-  if(tf) rows=rows.filter(r=>r['Activity Type']===tf);
-  if(q) rows=rows.filter(r=>(r['Title']+' '+r['Description']+' '+r['Activity Type']).toLowerCase().includes(q));
+  if(tf) rows=rows.filter(r=>typeOf(r)===tf);
+  if(q) rows=rows.filter(r=>(r['Title']+' '+descOf(r)+' '+typeOf(r)).toLowerCase().includes(q));
 
   // type frequency for "most common"
   const typeFreq={};
-  DATA.forEach(r=>{typeFreq[r['Activity Type']]=(typeFreq[r['Activity Type']]||0)+1;});
+  DATA.forEach(r=>{typeFreq[typeOf(r)]=(typeFreq[typeOf(r)]||0)+1;});
 
   rows.sort((a,b)=>{
     if(sort==='rating') return parseRating(b.Rating)-parseRating(a.Rating);
     if(sort==='reviews') return parseReviews(b.Reviews)-parseReviews(a.Reviews);
-    if(sort==='common')  return (typeFreq[b['Activity Type']]||0)-(typeFreq[a['Activity Type']]||0);
+    if(sort==='common')  return (typeFreq[typeOf(b)]||0)-(typeFreq[typeOf(a)]||0);
     // best = rating * log(reviews+1)
     const sa=parseRating(a.Rating)*Math.log(parseReviews(a.Reviews)+2);
     const sb=parseRating(b.Rating)*Math.log(parseReviews(b.Reviews)+2);
@@ -277,8 +277,11 @@ function render(){
 // A row's Image is a real photo only if it's a Google user-content photo CDN link.
 // The generic "default_user.png" placeholder is treated as no photo.
 function isRealPhoto(url){
-  return /lh3\.googleusercontent\.com|googleusercontent\.com\/gps-cs-s/.test(url||'');
+  return /lh[3-6]\.googleusercontent\.com|googleusercontent\.com\/(gps-cs|gps-proxy|gpc|p\/|proxy)|streetviewpixels-pa\.googleapis\.com/.test(url||'');
 }
+// Some CSVs omit Activity Type / Description. Fall back to other columns so the app still works.
+function typeOf(r){ return r['Activity Type']||r['Industry']||r['Type']||''; }
+function descOf(r){ return r['Description']||r['Amenities']||''; }
 // No-key fallback: a single OpenStreetMap map tile computed from lat/long.
 function osmStaticMap(lat,lon){
   lat=parseFloat(lat); lon=parseFloat(lon);
@@ -289,8 +292,14 @@ function osmStaticMap(lat,lon){
   const y=Math.floor((1-Math.log(Math.tan(latRad)+1/Math.cos(latRad))/Math.PI)/2*n);
   return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
 }
+// Rewrite a Google photo URL to request a large, sharp image (drop any size token, add =s1600).
+function upscalePhoto(url){
+  if(!url) return url;
+  if(/googleusercontent\.com/.test(url)) return url.split('=')[0]+'=s1600';
+  return url;
+}
 function imageFor(r){
-  if(isRealPhoto(r['Image'])) return r['Image'];
+  if(isRealPhoto(r['Image'])) return upscalePhoto(r['Image']);
   return osmStaticMap(r['Latitude'],r['Longitude']);
 }
 
@@ -309,8 +318,8 @@ function card(r){
   return `<div class="card">
     ${imgHTML}
     <div class="t">${escapeHTML(r['Title'])}</div>
-    <div class="ty">${escapeHTML(r['Activity Type']||'')}</div>
-    <div class="d">${escapeHTML((r['Description']||'').slice(0,180))}</div>
+    <div class="ty">${escapeHTML(typeOf(r))}</div>
+    <div class="d">${escapeHTML(descOf(r).slice(0,180))}</div>
     <div class="meta">
       <span><b>★ ${escapeHTML(r['Rating']||'-')}</b></span>
       <span>${escapeHTML(r['Reviews']||'(0)')} reviews</span>
@@ -327,7 +336,7 @@ function init(text){
   // populate type filter (reset first so re-loads don't duplicate)
   const sel=document.getElementById('typeFilter');
   sel.innerHTML='<option value="">All types</option>';
-  const types=[...new Set(DATA.map(r=>r['Activity Type']).filter(Boolean))].sort();
+  const types=[...new Set(DATA.map(r=>typeOf(r)).filter(Boolean))].sort();
   types.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);});
   render();
 }
@@ -399,8 +408,8 @@ function exportCSV(){
   const tf=document.getElementById('typeFilter').value;
   const q=document.getElementById('search').value.trim().toLowerCase();
   let rows=DATA.slice();
-  if(tf) rows=rows.filter(r=>r['Activity Type']===tf);
-  if(q) rows=rows.filter(r=>(r['Title']+' '+r['Description']+' '+r['Activity Type']).toLowerCase().includes(q));
+  if(tf) rows=rows.filter(r=>typeOf(r)===tf);
+  if(q) rows=rows.filter(r=>(r['Title']+' '+descOf(r)+' '+typeOf(r)).toLowerCase().includes(q));
   if(activeCat!=='all') rows=rows.filter(r=>r._cat===activeCat);
   rows.forEach(r=>{
     lines.push([CAT_LABEL[r._cat],...headers.map(h=>r[h])].map(csvEscape).join(','));

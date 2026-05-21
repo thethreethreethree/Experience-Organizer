@@ -10,7 +10,7 @@
 //
 // Requires: npm install puppeteer-core   (uses your existing Chrome)
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
@@ -48,14 +48,105 @@ export async function enrichCsv(text, onProgress) {
   const titleIdx = headers.indexOf('Title');
   if (linkIdx < 0 || imgIdx < 0) throw new Error('CSV missing "Image" or "Google Maps Link" column');
 
-  const browser = await puppeteer.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox', '--lang=en-US'] });
+  const browser = await puppeteer.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox', '--lang=en-US', '--window-size=1280,900'] });
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900 });
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  // Pre-accept Google consent cookies so the place page (not a consent wall) loads.
+  try {
+    await page.setCookie(
+      { name: 'CONSENT', value: 'YES+cb.20210720-07-p0.en+FX+410', domain: '.google.com' },
+      { name: 'SOCS', value: 'CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg', domain: '.google.com' },
+    );
+  } catch {}
+
   const acceptConsent = async () => {
     try {
-      const btn = await page.$('button[aria-label*="Accept"], form[action*="consent"] button');
-      if (btn) { await btn.click(); await sleep(1500); }
+      const btn = await page.$('button[aria-label*="Accept all"], button[aria-label*="Accept"], form[action*="consent"] button, button[jsname="b3VHJd"]');
+      if (btn) { await btn.click().catch(() => {}); await sleep(1200); }
     } catch {}
+  };
+
+  // Pull every plausible photo URL from the rendered page AND its raw HTML/JSON,
+  // then pick the largest non-avatar one. Runs inside the browser context.
+  const extractInPage = () => {
+    const urls = new Set();
+    const add = u => { if (u && typeof u === 'string') urls.add(u.replace(/\\u003d/g, '=').replace(/\\\//g, '/')); };
+    // 1) <img> src / currentSrc / srcset / lazy attrs
+    document.querySelectorAll('img').forEach(i => {
+      add(i.src); add(i.currentSrc);
+      add(i.getAttribute('data-src')); add(i.getAttribute('data-iml'));
+      if (i.srcset) i.srcset.split(',').forEach(p => add(p.trim().split(' ')[0]));
+    });
+    // 2) CSS background-image on any element (the Maps hero photo is often a div bg)
+    document.querySelectorAll('*').forEach(el => {
+      let bg = '';
+      try { bg = getComputedStyle(el).backgroundImage || ''; } catch {}
+      if (bg.includes('googleusercontent')) {
+        const m = bg.match(/url\(["']?(.*?)["']?\)/);
+        if (m) add(m[1]);
+      }
+    });
+    // 3) Raw HTML / embedded JSON. De-escape first (JSON has \/ and =),
+    //    then match any googleusercontent photo path (gps-cs, gpc, p/, a-/, etc).
+    const html = document.documentElement.outerHTML
+      .replace(/\\u003d/g, '=').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+    const re = /https:\/\/(?:lh[3-6]|streetviewpixels-pa)\.googleusercontent\.com\/[A-Za-z0-9_\-./=]+/g;
+    let m; while ((m = re.exec(html))) add(m[0]);
+
+    // A real place photo: googleusercontent with a long photo token. Exclude tiny avatars.
+    const isReal = s => /googleusercontent\.com\/(gps-cs|gps-proxy|gpc|p\/|proxy|a-\/|a\/)/.test(s)
+      || /lh[3-6]\.googleusercontent\.com\/[A-Za-z0-9_-]{12,}/.test(s);
+    const isAvatar = s => /default_user/.test(s)
+      || /=w\d+-h\d+-p\b/.test(s)            // profile-cropped thumbs (=w32-h32-p...)
+      || /=s(?:16|24|32|40|48|50|64|72|96|100|120)\b/.test(s);
+    // Rough "resolution" score so we prefer the biggest available image.
+    const sizeOf = s => {
+      const w = s.match(/=w(\d+)/), h = s.match(/=h(\d+)/), ss = s.match(/=s(\d+)/);
+      return Math.max(w ? +w[1] : 0, h ? +h[1] : 0, ss ? +ss[1] : 0) || 1; // 1 = present but unsized
+    };
+    const cands = [...urls].filter(isReal).filter(s => !isAvatar(s));
+    cands.sort((a, b) => sizeOf(b) - sizeOf(a));
+    return cands[0] || '';
+  };
+
+  // Normalize to a large, sharp image: drop any existing size token, then append one.
+  // =s1600 (longest-side 1600px) is supported across all googleusercontent photo forms.
+  const upscale = u => {
+    const base = u.split('=')[0];
+    return base + '=s1600';
+  };
+
+  // Fetch one place with up to 2 navigation attempts (handles rate-limit/timeouts).
+  const fetchPhoto = async (link) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await page.goto(link, { waitUntil: 'networkidle2', timeout: 60000 });
+        await acceptConsent();
+        // Wait until the place panel actually loads (title stops being the generic "Google Maps").
+        await page.waitForFunction(
+          () => document.title && !/^Google Maps/.test(document.title),
+          { timeout: 20000 }
+        ).catch(() => {});
+        // Wait for the place heading too (where the hero photo lives).
+        await page.waitForSelector('h1', { timeout: 8000 }).catch(() => {});
+        await sleep(1800);
+        await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
+        await sleep(1000);
+        let photo = await page.evaluate(extractInPage);
+        if (photo) return upscale(photo);
+        // Last resort: click the hero/photo button to open the gallery, then re-extract.
+        try {
+          const heroBtn = await page.$('button[jsaction*="hero"], button[aria-label*="Photo"], button[data-photo-index], img[decoding]');
+          if (heroBtn) { await heroBtn.click().catch(() => {}); await sleep(1800); }
+          photo = await page.evaluate(extractInPage);
+          if (photo) return upscale(photo);
+        } catch {}
+      } catch {
+        await sleep(2500); // backoff before retry
+      }
+    }
+    return '';
   };
 
   let filled = 0;
@@ -67,21 +158,11 @@ export async function enrichCsv(text, onProgress) {
     const title = r[titleIdx] || `row ${i}`;
     let ok = false;
     if (link) {
-      try {
-        await page.goto(link, { waitUntil: 'networkidle2', timeout: 45000 });
-        await acceptConsent();
-        await page.waitForSelector('img', { timeout: 15000 }).catch(() => {});
-        await sleep(1200);
-        const photo = await page.evaluate(() => {
-          const imgs = [...document.querySelectorAll('img')].map(i => i.src).filter(Boolean);
-          const real = imgs.find(s => /googleusercontent\.com\/(gps-cs|p\/|proxy)/.test(s) || /lh[3-6]\.googleusercontent\.com/.test(s));
-          return real || '';
-        });
-        if (photo && !photo.includes('default_user')) { r[imgIdx] = photo; filled++; ok = true; }
-      } catch {}
+      const photo = await fetchPhoto(link);
+      if (photo) { r[imgIdx] = photo; filled++; ok = true; }
     }
     if (onProgress) onProgress(title, ok, i, total);
-    await sleep(800);
+    await sleep(700);
   }
   await browser.close();
   return { csv: toCSV(rows), filled, total };
@@ -90,11 +171,38 @@ export async function enrichCsv(text, onProgress) {
 // ---- CLI mode ---- (robust on Windows: compare resolved file paths)
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (invokedDirectly) {
-  const input = process.argv[2] || new URL('./data/things_to_do.csv', import.meta.url).pathname.replace(/^\//, '');
-  const out = new URL('./data/things_to_do_photos.csv', import.meta.url);
+  const input = process.argv[2]
+    ? process.argv[2]
+    : fileURLToPath(new URL('./data/things_to_do.csv', import.meta.url));
+  // Enrich the live file IN PLACE so the app picks it up automatically.
+  const target = input;
   const text = await readFile(input, 'utf8');
   const { csv, filled, total } = await enrichCsv(text, (title, ok) => console.log(`${ok ? '✓' : '·'} ${title}`));
-  await writeFile(out, csv, 'utf8');
-  console.log(`\nDone. Filled ${filled}/${total} rows.`);
-  console.log(`Wrote ${out.pathname}`);
+
+  // Write via a fresh temp file + rename. Avoids the "stale locked file" trap and
+  // gives an atomic swap. Retries cover transient OneDrive/AV locks.
+  const tmp = target.replace(/[^\\/]+$/, `.scrape_${Date.now()}.tmp`);
+  let saved = false;
+  for (let attempt = 0; attempt < 8 && !saved; attempt++) {
+    try {
+      await writeFile(tmp, csv, 'utf8');
+      try { await rm(target, { force: true }); } catch {}
+      await rename(tmp, target);
+      saved = true;
+    } catch (e) {
+      if (['EBUSY', 'EPERM', 'EEXIST', 'EACCES'].includes(e.code)) {
+        console.log(`(target locked: ${e.code} - retry ${attempt + 1}/8 in 3s; close the CSV / pause OneDrive if it persists)`);
+        try { await rm(tmp, { force: true }); } catch {}
+        await sleep(3000);
+      } else { throw e; }
+    }
+  }
+  if (!saved) {
+    // Final fallback: never lose the work - dump beside the file with a timestamp.
+    const fallback = target.replace(/[^\\/]+$/, `things_to_do_photos_${Date.now()}.csv`);
+    await writeFile(fallback, csv, 'utf8');
+    console.error(`\nLive file was locked. Saved results to:\n  ${fallback}\nClose the open CSV / pause OneDrive, then copy it over things_to_do.csv.`);
+    process.exit(2);
+  }
+  console.log(`\nDone. Filled ${filled}/${total} rows. Updated ${target}`);
 }
