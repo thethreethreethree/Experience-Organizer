@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Experience Organizer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg:#0f1115; --card:#171a21; --muted:#8b93a7; --fg:#e7eaf0;
+    --accent:#ffb84d; --day:#ffd166; --mid:#06aed5; --night:#7b2cbf; --border:#262a35;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  header{padding:24px 32px;border-bottom:1px solid var(--border)}
+  header h1{margin:0;font-size:22px}
+  header .sub{color:var(--muted);font-size:13px;margin-top:4px}
+  main{padding:24px 32px;max-width:1400px;margin:0 auto}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}
+  .stat .n{font-size:28px;font-weight:600}
+  .stat .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+  .stat.day .n{color:var(--day)} .stat.mid .n{color:var(--mid)} .stat.night .n{color:var(--night)}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:20px}
+  .controls label{font-size:12px;color:var(--muted);margin-right:4px}
+  .controls select,.controls input{background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px}
+  .controls input{min-width:220px}
+  .chip{background:var(--card);border:1px solid var(--border);border-radius:999px;padding:6px 12px;font-size:12px;cursor:pointer;user-select:none}
+  .chip.active{background:var(--accent);color:#1a1408;border-color:var(--accent);font-weight:600}
+  .columns{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .col{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;min-height:200px}
+  .col h2{margin:0 0 12px;font-size:14px;text-transform:uppercase;letter-spacing:.5px;display:flex;justify-content:space-between;align-items:center}
+  .col.day h2{color:var(--day)} .col.mid h2{color:var(--mid)} .col.night h2{color:var(--night)}
+  .col h2 .count{background:rgba(255,255,255,.06);padding:2px 8px;border-radius:999px;font-size:12px;color:var(--muted);font-weight:400}
+  .card{padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px;background:#111419}
+  .card .t{font-weight:600;font-size:14px;line-height:1.3}
+  .card .ty{color:var(--muted);font-size:11px;margin:2px 0 6px}
+  .card .d{font-size:12px;color:#c4c9d6;line-height:1.4}
+  .card .meta{margin-top:8px;font-size:11px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
+  .card .meta b{color:var(--fg);font-weight:600}
+  .card a{color:var(--accent);text-decoration:none}
+  .empty{color:var(--muted);font-size:13px;padding:20px;text-align:center}
+  .error{background:#3a1f1f;border:1px solid #6b3030;padding:16px;border-radius:8px;margin:20px 0}
+  .error button{margin-top:8px}
+  @media (max-width:900px){.columns{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Experience Organizer</h1>
+  <div class="sub">Local activity browser - categorized by time of day</div>
+</header>
+<main>
+  <div id="loadError" class="error" style="display:none">
+    <div><b>Couldn't auto-load CSV.</b> Browsers block file:// fetch. Pick the CSV manually:</div>
+    <input type="file" id="filePicker" accept=".csv" style="margin-top:8px"/>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px">Tip: to skip this, run <code>python -m http.server</code> in this folder and open http://localhost:8000</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n" id="total">-</div><div class="l">Total Experiences</div></div>
+    <div class="stat day"><div class="n" id="cDay">-</div><div class="l">Daytime</div></div>
+    <div class="stat mid"><div class="n" id="cMid">-</div><div class="l">Midday</div></div>
+    <div class="stat night"><div class="n" id="cNight">-</div><div class="l">Nighttime</div></div>
+  </div>
+
+  <div class="controls">
+    <label>Sort</label>
+    <select id="sort">
+      <option value="best">Best (rating x reviews)</option>
+      <option value="rating">Highest Rated</option>
+      <option value="reviews">Most Reviews</option>
+      <option value="common">Most Common (by type)</option>
+    </select>
+    <label>Type</label>
+    <select id="typeFilter"><option value="">All types</option></select>
+    <input type="search" id="search" placeholder="Search title or description..."/>
+    <span class="chip active" data-cat="all">All</span>
+    <span class="chip" data-cat="day">Daytime</span>
+    <span class="chip" data-cat="mid">Midday</span>
+    <span class="chip" data-cat="night">Nighttime</span>
+  </div>
+
+  <div class="columns">
+    <div class="col day"><h2>Daytime <span class="count" id="dayCount">0</span></h2><div id="dayList"></div></div>
+    <div class="col mid"><h2>Midday <span class="count" id="midCount">0</span></h2><div id="midList"></div></div>
+    <div class="col night"><h2>Nighttime <span class="count" id="nightCount">0</span></h2><div id="nightList"></div></div>
+  </div>
+</main>
+
+<script>
+// --- CSV parser (handles quoted fields) ---
+function parseCSV(text){
+  const rows=[]; let row=[], cur='', inQ=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i], n=text[i+1];
+    if(inQ){
+      if(c==='"' && n==='"'){cur+='"';i++;}
+      else if(c==='"'){inQ=false;}
+      else cur+=c;
+    } else {
+      if(c==='"') inQ=true;
+      else if(c===','){row.push(cur);cur='';}
+      else if(c==='\n'){row.push(cur);rows.push(row);row=[];cur='';}
+      else if(c==='\r'){}
+      else cur+=c;
+    }
+  }
+  if(cur.length||row.length){row.push(cur);rows.push(row);}
+  const headers=rows.shift();
+  return rows.filter(r=>r.length>1 && r[0]).map(r=>{
+    const o={}; headers.forEach((h,i)=>o[h.trim()]=r[i]||''); return o;
+  });
+}
+
+// --- Categorization ---
+const DAY_KW=['sunrise','morning','hike','hiking','climb','climbing','kayak','snorkel','snorkeling','island hop','island-hop','dive','diving','scuba','freediv','tour','ecotour','expedition','adventure','zipline','paintball','via ferrata','yoga','cafe','breakfast','wetland','nature','cliff','canyon','wellness','massage','spa','gym','fitness','crossfit','workout','shooting','rental','viewpoint','attraction','cultural'];
+const MID_KW=['beach','lagoon','swim','pool','beach club','island','islet','natural attraction','viewpoint','scenic','pier','beachfront','resort','hotel','hostel','b&b','bed & breakfast','vacation','wetland','reserve','rental','coworking','park','court','garden','venue'];
+const NIGHT_KW=['sunset','night','bar','cocktail','lounge','restaurant','dining','dinner','club','nightlife','wreck bar','beach bar'];
+
+function categorize(row){
+  const txt=((row['Title']||'')+' '+(row['Activity Type']||'')+' '+(row['Description']||'')+' '+(row['Industry']||'')+' '+(row['Amenities']||'')).toLowerCase();
+  const score={day:0,mid:0,night:0};
+  for(const k of NIGHT_KW) if(txt.includes(k)) score.night+=2;
+  for(const k of MID_KW)   if(txt.includes(k)) score.mid+=1;
+  for(const k of DAY_KW)   if(txt.includes(k)) score.day+=1;
+  // sunset/bar dominate
+  if(txt.includes('sunset')||txt.includes('cocktail')||txt.includes('night')) score.night+=3;
+  // hotels/hostels lean midday (base of operations)
+  if(/hostel|hotel|resort|b&b|bed & breakfast|vacation rental/.test(txt)){ score.mid+=2; }
+  const best=Object.entries(score).sort((a,b)=>b[1]-a[1])[0];
+  return best[1]===0 ? 'mid' : best[0];
+}
+
+function parseRating(r){const n=parseFloat(r); return isNaN(n)?0:n;}
+function parseReviews(r){if(!r)return 0; const m=(''+r).replace(/[^\d]/g,''); return parseInt(m||'0',10);}
+
+// --- State ---
+let DATA=[]; let activeCat='all';
+
+function render(){
+  const sort=document.getElementById('sort').value;
+  const tf=document.getElementById('typeFilter').value;
+  const q=document.getElementById('search').value.trim().toLowerCase();
+
+  let rows=DATA.slice();
+  if(tf) rows=rows.filter(r=>r['Activity Type']===tf);
+  if(q) rows=rows.filter(r=>(r['Title']+' '+r['Description']+' '+r['Activity Type']).toLowerCase().includes(q));
+
+  // type frequency for "most common"
+  const typeFreq={};
+  DATA.forEach(r=>{typeFreq[r['Activity Type']]=(typeFreq[r['Activity Type']]||0)+1;});
+
+  rows.sort((a,b)=>{
+    if(sort==='rating') return parseRating(b.Rating)-parseRating(a.Rating);
+    if(sort==='reviews') return parseReviews(b.Reviews)-parseReviews(a.Reviews);
+    if(sort==='common')  return (typeFreq[b['Activity Type']]||0)-(typeFreq[a['Activity Type']]||0);
+    // best = rating * log(reviews+1)
+    const sa=parseRating(a.Rating)*Math.log(parseReviews(a.Reviews)+2);
+    const sb=parseRating(b.Rating)*Math.log(parseReviews(b.Reviews)+2);
+    return sb-sa;
+  });
+
+  const buckets={day:[],mid:[],night:[]};
+  rows.forEach(r=>{buckets[r._cat].push(r);});
+
+  document.getElementById('total').textContent=DATA.length;
+  document.getElementById('cDay').textContent=DATA.filter(r=>r._cat==='day').length;
+  document.getElementById('cMid').textContent=DATA.filter(r=>r._cat==='mid').length;
+  document.getElementById('cNight').textContent=DATA.filter(r=>r._cat==='night').length;
+
+  for(const k of ['day','mid','night']){
+    const list=buckets[k];
+    document.getElementById(k+'Count').textContent=list.length;
+    const el=document.getElementById(k+'List');
+    if(activeCat!=='all' && activeCat!==k){ el.innerHTML='<div class="empty">Filtered out</div>'; continue; }
+    if(!list.length){ el.innerHTML='<div class="empty">No matches</div>'; continue; }
+    el.innerHTML=list.map(card).join('');
+  }
+}
+
+function card(r){
+  const map=r['Google Maps Link']?`<a href="${r['Google Maps Link']}" target="_blank">Maps</a>`:'';
+  const site=r['Website']?`<a href="${r['Website']}" target="_blank">Site</a>`:'';
+  return `<div class="card">
+    <div class="t">${escapeHTML(r['Title'])}</div>
+    <div class="ty">${escapeHTML(r['Activity Type']||'')}</div>
+    <div class="d">${escapeHTML((r['Description']||'').slice(0,180))}</div>
+    <div class="meta">
+      <span><b>★ ${escapeHTML(r['Rating']||'-')}</b></span>
+      <span>${escapeHTML(r['Reviews']||'(0)')} reviews</span>
+      ${site} ${map}
+    </div>
+  </div>`;
+}
+function escapeHTML(s){return (s||'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':'&quot;'}[c]));}
+
+function init(text){
+  DATA=parseCSV(text).map(r=>{r._cat=categorize(r);return r;});
+  // populate type filter
+  const types=[...new Set(DATA.map(r=>r['Activity Type']).filter(Boolean))].sort();
+  const sel=document.getElementById('typeFilter');
+  types.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);});
+  render();
+}
+
+document.getElementById('sort').addEventListener('change',render);
+document.getElementById('typeFilter').addEventListener('change',render);
+document.getElementById('search').addEventListener('input',render);
+document.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{
+  document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
+  c.classList.add('active'); activeCat=c.dataset.cat; render();
+}));
+
+fetch('data/things_to_do.csv').then(r=>{
+  if(!r.ok) throw new Error(r.status); return r.text();
+}).then(init).catch(()=>{
+  document.getElementById('loadError').style.display='block';
+  document.getElementById('filePicker').addEventListener('change',e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{document.getElementById('loadError').style.display='none';init(ev.target.result);};
+    reader.readAsText(f);
+  });
+});
+</script>
+</body>
+</html>
