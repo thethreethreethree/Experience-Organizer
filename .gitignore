@@ -1,0 +1,4 @@
+*.tmp
+.ig-session/
+.scrape_*
+node_modules/

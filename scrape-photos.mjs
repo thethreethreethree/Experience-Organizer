@@ -174,8 +174,11 @@ if (invokedDirectly) {
   const input = process.argv[2]
     ? process.argv[2]
     : fileURLToPath(new URL('./data/things_to_do.csv', import.meta.url));
-  // Enrich the live file IN PLACE so the app picks it up automatically.
-  const target = input;
+  // Output is named after the input file (content-aware), e.g. "HOSTEL V1.csv" -> "HOSTEL V1_enriched.csv".
+  // Pass a 3rd arg to override, or "--inplace" to overwrite the source.
+  const arg3 = process.argv[3];
+  const target = (arg3 === '--inplace') ? input
+    : (arg3 ? arg3 : input.replace(/\.csv$/i, '') + '_enriched.csv');
   const text = await readFile(input, 'utf8');
   const { csv, filled, total } = await enrichCsv(text, (title, ok) => console.log(`${ok ? '✓' : '·'} ${title}`));
 

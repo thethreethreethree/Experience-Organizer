@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Experience Organizer</title>
+<title>Data Collection System</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
   :root {
@@ -45,7 +45,10 @@
   .backbtn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;margin-bottom:14px}
   .backbtn:hover{color:var(--fg);border-color:var(--accent)}
   .card{padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px;background:#111419}
+  .card{position:relative}
   .card .thumb{width:100%;height:140px;object-fit:cover;border-radius:6px;margin-bottom:8px;background:#0c0e12;display:block}
+  .card .done{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:#22c55e;color:#04210f;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.5);z-index:2}
+  .card.complete{border-color:#22c55e55}
   .card .t{font-weight:600;font-size:14px;line-height:1.3}
   .card .ty{color:var(--muted);font-size:11px;margin:2px 0 6px}
   .card .d{font-size:12px;color:#c4c9d6;line-height:1.4}
@@ -60,6 +63,20 @@
   #dropZone.drag{border-color:var(--accent);background:rgba(255,184,77,.08);color:var(--fg)}
   #dropZone strong{color:var(--fg)}
   #dropZone .hint{font-size:11px;margin-top:6px}
+  /* Scrape progress */
+  #progWrap{display:none;margin:6px 0 14px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  #progWrap .ptop{display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:8px}
+  #progWrap .ptop b{color:var(--fg)} #progWrap .pphase{color:var(--muted)}
+  #progTrack{height:10px;border-radius:999px;background:#0c0e12;overflow:hidden;position:relative}
+  #progBar{position:absolute;top:0;bottom:0;left:0;width:35%;border-radius:999px;
+    background:linear-gradient(90deg,#06aed5,#7b2cbf,#06aed5);background-size:200% 100%;
+    animation:progslide 1.1s linear infinite, progshift 2s linear infinite}
+  #progBar.done{width:100% !important;animation:none;background:#22c55e}
+  #progBar.determinate{animation:progshift 2s linear infinite;left:0}
+  @keyframes progslide{0%{left:-35%}100%{left:100%}}
+  @keyframes progshift{0%{background-position:0 0}100%{background-position:200% 0}}
+  #progSpin{display:inline-block;width:13px;height:13px;border:2px solid #ffffff33;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
   @media (max-width:900px){.columns{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
@@ -67,26 +84,30 @@
 
 <!-- LANDING -->
 <section id="landing">
-  <h1>El Nido Organizer</h1>
-  <p class="lead">Choose what you want to browse.</p>
+  <h1>Data Collection System</h1>
+  <p class="lead">Choose a dataset to organize, enrich, and export.</p>
   <div class="pickers">
     <div class="pick" data-view="experience">
       <div class="ico">🏝️</div>
       <h3>Experience Product</h3>
-      <p>Activities, tours &amp; attractions, grouped by time of day (Morning / Midday / Nighttime).</p>
+      <p>Activities, tours &amp; attractions, grouped by <b>time of day</b> (Morning / Midday / Nighttime).</p>
     </div>
     <div class="pick" data-view="restaurants">
       <div class="ico">🍽️</div>
       <h3>Restaurants</h3>
-      <p>Places to eat and drink.</p>
-      <span class="tag">Coming soon</span>
+      <p>Places to eat &amp; drink, grouped by <b>cuisine type</b> — new cuisines are added automatically from your CSV.</p>
     </div>
     <div class="pick" data-view="stays">
       <div class="ico">🛏️</div>
       <h3>Stays</h3>
-      <p>Accommodation, grouped by type (Hostel / Hotel / Resort / B&amp;B / Guesthouse).</p>
+      <p>Accommodation, grouped by <b>type</b> (Hostel / Hotel / Resort / B&amp;B / Guesthouse).</p>
     </div>
   </div>
+  <div id="igLoginRow" style="margin-top:28px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <button id="igLoginBtn" style="background:#e1306c;color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer">🔑 Log in to Instagram</button>
+    <span style="font-size:12px;color:var(--muted)">Opens a Chrome window to sign in (use a secondary account). Needed before scraping IG posts. Your session is saved locally; your password is never seen by this app.</span>
+  </div>
+  <div id="igLoginStatus" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
 </section>
 
 <!-- APP -->
@@ -127,8 +148,13 @@
       <input type="search" id="search" placeholder="Search title or description..."/>
       <span id="catChips"></span>
       <button id="photoBtn" style="margin-left:auto;background:#06aed5;color:#04222a;border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer">Fetch real photos</button>
+      <button id="igBtn" style="background:#e1306c;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer">Scrape IG</button>
       <button id="askBtn" style="background:#7b2cbf;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer">Ask Claude to Reorganize</button>
       <button id="exportBtn" style="background:var(--accent);color:#1a1408;border:0;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer">Export CSV</button>
+    </div>
+    <div id="progWrap">
+      <div class="ptop"><span><span id="progSpin"></span><b id="progTitle">Working…</b></span><span class="pphase" id="progPhase"></span></div>
+      <div id="progTrack"><div id="progBar"></div></div>
     </div>
     <div id="photoStatus" style="font-size:12px;color:var(--muted);margin-bottom:12px;display:none"></div>
 
@@ -275,6 +301,19 @@ function categorizeStay(r){
   return 'hostel'; // sensible default for a hostel-leaning dataset
 }
 
+// --- Restaurants categorization (by cuisine) ---
+// Uses a Cuisine column if present; otherwise infers from type/title keywords.
+// New cuisines are added to the category list automatically (groups are built from the data).
+const CUISINE_KW=[['filipino','Filipino'],['lutong bahay','Filipino'],['italian','Italian'],['pizza','Italian'],['pasta','Italian'],['japanese','Japanese'],['sushi','Japanese'],['ramen','Japanese'],['korean','Korean'],['thai','Thai'],['indian','Indian'],['chinese','Chinese'],['dimsum','Chinese'],['mexican','Mexican'],['taco','Mexican'],['american','American'],['burger','American'],['steak','Steakhouse'],['seafood','Seafood'],['grill','Grill'],['bbq','BBQ'],['barbecue','BBQ'],['vegan','Vegan'],['vegetarian','Vegetarian'],['cafe','Cafe'],['coffee','Cafe'],['bakery','Bakery'],['dessert','Dessert'],['ice cream','Dessert'],['bar','Bar & Drinks'],['pub','Bar & Drinks'],['mediterranean','Mediterranean'],['greek','Mediterranean'],['french','French'],['spanish','Spanish'],['tapas','Spanish'],['vietnamese','Vietnamese'],['fusion','Fusion'],['international','International'],['fast food','Fast Food']];
+function titleCase(s){return (s||'').replace(/\w\S*/g,w=>w.charAt(0).toUpperCase()+w.slice(1).toLowerCase());}
+function cuisineOf(r){
+  const explicit=(r['Cuisine']||r['Cuisine Type']||r['Cuisine type']||'').trim();
+  if(explicit) return titleCase(explicit);
+  const t=norm(typeOf(r)+' '+(r['Title']||'')+' '+(r['Description']||''));
+  for(const [k,v] of CUISINE_KW) if(t.includes(k)) return v;
+  return 'Other';
+}
+
 // --- View definitions ---
 const VIEWS={
   experience:{
@@ -297,21 +336,36 @@ const VIEWS={
       {key:'guesthouse',label:'Guesthouse',color:'#b18cff'},
     ],
   },
-  restaurants:{ label:'Restaurants', comingSoon:true },
+  restaurants:{
+    label:'Restaurants', sub:'Restaurants - grouped by cuisine (auto-detected from your CSV)',
+    csv:'data/restaurants.csv', classify:r=>cuisineOf(r), dynamic:true,
+    groups:[], // built from the data on load
+  },
 };
+// Palette for dynamically-discovered categories (cuisines).
+const PALETTE=['#ffb84d','#06aed5','#7b2cbf','#51cf66','#ff6b6b','#b18cff','#ffd166','#4dd4ac','#f783ac','#74c0fc','#ffa94d','#a9e34b'];
+// Build group definitions from the distinct categories present in the data.
+function groupsFromData(){
+  const cats=[...new Set(DATA.map(r=>r._cat).filter(Boolean))].sort();
+  return cats.map((c,i)=>({key:c,label:c,color:PALETTE[i%PALETTE.length]}));
+}
 
 // --- State ---
 let DATA=[]; let activeCat='all'; let VIEW=null;
+
+// Slug for safe element IDs (cuisine names can contain spaces / "&").
+function slugOf(key){ return 'g_'+(key||'').replace(/[^a-zA-Z0-9]+/g,'_'); }
 
 // Build the view-specific UI (stats cards, category chips, columns).
 function buildChrome(){
   const stats=document.getElementById('stats');
   stats.innerHTML='<div class="stat"><div class="n" id="statTotal">-</div><div class="l">Total</div></div>'+
-    VIEW.groups.map(g=>`<div class="stat"><div class="n" id="stat_${g.key}" style="color:${g.color}">-</div><div class="l">${g.label}</div></div>`).join('');
+    '<div class="stat"><div class="n" id="statDone" style="color:#22c55e">-</div><div class="l">✓ Data complete</div></div>'+
+    VIEW.groups.map(g=>`<div class="stat"><div class="n" id="stat_${slugOf(g.key)}" style="color:${g.color}">-</div><div class="l">${escapeHTML(g.label)}</div></div>`).join('');
 
   const chips=document.getElementById('catChips');
   chips.innerHTML='<span class="chip active" data-cat="all">All</span>'+
-    VIEW.groups.map(g=>`<span class="chip" data-cat="${g.key}">${g.label}</span>`).join('');
+    VIEW.groups.map(g=>`<span class="chip" data-cat="${escapeHTML(g.key)}">${escapeHTML(g.label)}</span>`).join('');
   chips.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{
     chips.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
     c.classList.add('active'); activeCat=c.dataset.cat; render();
@@ -319,7 +373,7 @@ function buildChrome(){
 
   const cols=document.getElementById('columns');
   cols.innerHTML=VIEW.groups.map(g=>
-    `<div class="col"><h2 style="color:${g.color}">${g.label} <span class="count" id="count_${g.key}">0</span></h2><div id="list_${g.key}"></div></div>`
+    `<div class="col"><h2 style="color:${g.color}">${escapeHTML(g.label)} <span class="count" id="count_${slugOf(g.key)}">0</span></h2><div id="list_${slugOf(g.key)}"></div></div>`
   ).join('');
 }
 
@@ -349,12 +403,14 @@ function render(){
   rows.forEach(r=>{ if(buckets[r._cat]) buckets[r._cat].push(r); });
 
   document.getElementById('statTotal').textContent=DATA.length;
+  const doneEl=document.getElementById('statDone'); if(doneEl) doneEl.textContent=DATA.filter(isComplete).length;
   VIEW.groups.forEach(g=>{
-    const sEl=document.getElementById('stat_'+g.key);
+    const sl=slugOf(g.key);
+    const sEl=document.getElementById('stat_'+sl);
     if(sEl) sEl.textContent=DATA.filter(r=>r._cat===g.key).length;
     const list=buckets[g.key]||[];
-    document.getElementById('count_'+g.key).textContent=list.length;
-    const el=document.getElementById('list_'+g.key);
+    const cEl=document.getElementById('count_'+sl); if(cEl) cEl.textContent=list.length;
+    const el=document.getElementById('list_'+sl); if(!el) return;
     if(activeCat!=='all' && activeCat!==g.key){ el.innerHTML='<div class="empty">Filtered out</div>'; return; }
     el.innerHTML=list.length ? list.map(card).join('') : '<div class="empty">No matches</div>';
   });
@@ -389,9 +445,14 @@ function imageFor(r){
   return osmStaticMap(r['Latitude'],r['Longitude']);
 }
 
+// A business is "done getting data" when it has both a real photo and an Instagram link.
+function isComplete(r){
+  return isRealPhoto(r['Image']) && /instagram\.com\/[A-Za-z0-9_.]+/.test(r['Instagram']||'');
+}
 function card(r){
   const map=r['Google Maps Link']?`<a href="${r['Google Maps Link']}" target="_blank">Maps</a>`:'';
   const site=r['Website']?`<a href="${r['Website']}" target="_blank">Site</a>`:'';
+  const ig=/instagram\.com/.test(r['Instagram']||'')?`<a href="${escapeHTML(r['Instagram'])}" target="_blank">IG</a>`:'';
   const img=imageFor(r);
   const fallback=osmStaticMap(r['Latitude'],r['Longitude']);
   // On load error: try the map tile once; if that also fails (or none), hide the image.
@@ -401,7 +462,9 @@ function card(r){
   const imgHTML=img
     ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" onerror="${onerr}">`
     : '';
-  return `<div class="card">
+  const done=isComplete(r);
+  return `<div class="card${done?' complete':''}">
+    ${done?'<div class="done" title="Data complete: photo + Instagram">✓</div>':''}
     ${imgHTML}
     <div class="t">${escapeHTML(r['Title'])}</div>
     <div class="ty">${escapeHTML(typeOf(r))}</div>
@@ -409,16 +472,20 @@ function card(r){
     <div class="meta">
       <span><b>★ ${escapeHTML(r['Rating']||'-')}</b></span>
       <span>${escapeHTML(r['Reviews']||'(0)')} reviews</span>
-      ${site} ${map}
+      ${site} ${ig} ${map}
     </div>
   </div>`;
 }
 function escapeHTML(s){return (s||'').replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':'&quot;'}[c]));}
 
-let LAST_CSV='';
-function init(text){
+let LAST_CSV=''; let LAST_FILENAME='';
+function init(text,filename){
   LAST_CSV=text;
+  if(filename) LAST_FILENAME=filename;
   DATA=parseCSV(text).map(r=>{r._cat=VIEW.classify(r);return r;});
+  // For dynamic views (Restaurants), build the category list from the data itself.
+  if(VIEW.dynamic) VIEW.groups=groupsFromData();
+  buildChrome();
   // populate type filter (reset first so re-loads don't duplicate)
   const sel=document.getElementById('typeFilter');
   sel.innerHTML='<option value="">All types</option>';
@@ -442,16 +509,20 @@ function openView(key){
   if(VIEW.comingSoon){ body.style.display='none'; soon.style.display='block'; return; }
   body.style.display='block'; soon.style.display='none';
   activeCat='all'; DATA=[]; LAST_CSV='';
-  buildChrome();
+  LAST_FILENAME=(VIEW.csv||'').split('/').pop()||'';
+  // Clear any prior chrome until data loads (init() rebuilds it).
+  document.getElementById('stats').innerHTML='';
+  document.getElementById('columns').innerHTML='';
+  document.getElementById('catChips').innerHTML='';
   const status=document.getElementById('photoStatus'); if(status){status.style.display='none';}
   fetch(VIEW.csv).then(r=>{ if(!r.ok) throw new Error(r.status); return r.text(); })
-    .then(init)
+    .then(t=>init(t, LAST_FILENAME))
     .catch(()=>{
       document.getElementById('loadError').style.display='block';
       document.getElementById('filePicker').onchange=e=>{
         const f=e.target.files[0]; if(!f) return;
         const reader=new FileReader();
-        reader.onload=ev=>{document.getElementById('loadError').style.display='none';init(ev.target.result);};
+        reader.onload=ev=>{document.getElementById('loadError').style.display='none';init(ev.target.result, f.name);};
         reader.readAsText(f);
       };
     });
@@ -463,13 +534,30 @@ document.querySelectorAll('.pick').forEach(p=>p.addEventListener('click',()=>{
 }));
 document.getElementById('backBtn').addEventListener('click',showLanding);
 
+// --- Log in to Instagram (opens a Chrome window via the local server) ---
+document.getElementById('igLoginBtn').addEventListener('click',async()=>{
+  const status=document.getElementById('igLoginStatus');
+  if(location.protocol==='file:'){
+    status.textContent='Run via start.bat (http://localhost:8000) first - the login window is launched by the local server.';
+    return;
+  }
+  status.textContent='Opening Chrome login window... sign in there, then it saves your session automatically.';
+  try{
+    const res=await fetch('/ig-login',{method:'POST'});
+    if(!res.ok) throw new Error(await res.text());
+    status.textContent='Chrome login window opened. Log in (secondary account), then close it. After that, use "Scrape IG posts" on a dataset.';
+  }catch(e){
+    status.textContent='Could not open login window: '+e.message;
+  }
+});
+
 // --- Drag & drop CSV ---
 const dropZone=document.getElementById('dropZone');
 const dropInput=document.getElementById('dropInput');
 function loadFile(f){
   if(!f) return;
   const reader=new FileReader();
-  reader.onload=ev=>{const le=document.getElementById('loadError');if(le)le.style.display='none';init(ev.target.result);};
+  reader.onload=ev=>{const le=document.getElementById('loadError');if(le)le.style.display='none';init(ev.target.result, f.name);};
   reader.readAsText(f);
 }
 dropZone.addEventListener('click',()=>dropInput.click());
@@ -477,6 +565,23 @@ dropInput.addEventListener('change',e=>loadFile(e.target.files[0]));
 ['dragenter','dragover'].forEach(ev=>dropZone.addEventListener(ev,e=>{e.preventDefault();dropZone.classList.add('drag');}));
 ['dragleave','drop'].forEach(ev=>dropZone.addEventListener(ev,e=>{e.preventDefault();dropZone.classList.remove('drag');}));
 dropZone.addEventListener('drop',e=>{const f=e.dataTransfer.files[0]; if(f) loadFile(f);});
+
+// --- Scrape progress bar (indeterminate while the server works, green on finish) ---
+function progStart(title,phase){
+  document.getElementById('progTitle').textContent=title||'Working…';
+  document.getElementById('progPhase').textContent=phase||'';
+  const bar=document.getElementById('progBar'); bar.className='';
+  document.getElementById('progSpin').style.display='inline-block';
+  document.getElementById('progWrap').style.display='block';
+}
+function progPhase(text){ document.getElementById('progPhase').textContent=text||''; }
+function progDone(){
+  document.getElementById('progBar').className='done';
+  document.getElementById('progSpin').style.display='none';
+  document.getElementById('progPhase').textContent='Done';
+  setTimeout(()=>{document.getElementById('progWrap').style.display='none';},2500);
+}
+function progFail(){ document.getElementById('progWrap').style.display='none'; }
 
 // --- Fetch real photos via local server (node server.mjs) ---
 document.getElementById('photoBtn').addEventListener('click',async()=>{
@@ -495,17 +600,53 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
     status.textContent='This CSV has no "Google Maps Link" data, so there is nothing to fetch photos from. Drag & drop your exported things_to_do_categorized.csv (it includes the links).';
     return;
   }
-  status.textContent=`Launching Chrome and fetching photos for ${linksCount} places... this can take a few minutes (~2s each). Watch the server console for progress. Do NOT refresh.`;
+  status.textContent=`Launching Chrome and fetching photos for ${linksCount} places... this can take a few minutes (~2s each). Watch the server console for detail. Do NOT refresh.`;
   btn.disabled=true; btn.style.opacity='.6';
+  progStart('Fetching photos…',`${linksCount} places`);
   try{
     const res=await fetch('/scrape',{method:'POST',headers:{'Content-Type':'text/csv'},body:LAST_CSV});
     if(!res.ok) throw new Error(await res.text());
     const enriched=await res.text();
     const filled=res.headers.get('X-Filled'), total=res.headers.get('X-Total');
-    init(enriched);
+    init(enriched, LAST_FILENAME);
+    progDone();
     status.textContent=`Done - filled ${filled}/${total} photos. Use Export CSV to save the enriched file.`;
   }catch(e){
+    progFail();
     status.textContent='Photo fetch failed: '+e.message+'  (Are you running it via "node server.mjs" at http://localhost:8000? It will not work from file://)';
+  }finally{
+    btn.disabled=false; btn.style.opacity='1';
+  }
+});
+
+// --- Scrape Instagram via local server ---
+document.getElementById('igBtn').addEventListener('click',async()=>{
+  if(!LAST_CSV){alert('Load a CSV first.');return;}
+  const status=document.getElementById('photoStatus');
+  const btn=document.getElementById('igBtn');
+  status.style.display='block';
+  if(location.protocol==='file:'){
+    status.textContent='Scraping needs the local server. Double-click start.bat, then open http://localhost:8000 (not the file directly).';
+    return;
+  }
+  const missing=DATA.filter(r=>!(r['Instagram']||'').includes('instagram.com')).length;
+  const withIg=DATA.length-missing;
+  status.textContent=`Scraping Instagram: finding handles for ${missing} place(s), then collecting first-3 posts for accounts that have a handle (needs IG login). This can take several minutes. Watch the server console. Do NOT refresh.`;
+  btn.disabled=true; btn.style.opacity='.6';
+  progStart('Scraping Instagram…',`handles + posts`);
+  try{
+    const res=await fetch('/scrape-instagram',{method:'POST',headers:{'Content-Type':'text/csv'},body:LAST_CSV});
+    if(!res.ok) throw new Error(await res.text());
+    const enriched=await res.text();
+    const filled=res.headers.get('X-Filled'), already=res.headers.get('X-Already');
+    const posts=res.headers.get('X-Posts'), loggedIn=res.headers.get('X-LoggedIn')==='true';
+    init(enriched, LAST_FILENAME);
+    progDone();
+    status.textContent=`Done - ${filled} new handle(s) found (${already} already had one). `+
+      (loggedIn?`Collected first-3 posts for ${posts} account(s).`:`Posts skipped - log in to Instagram on the home page first.`)+` Use Export CSV to save.`;
+  }catch(e){
+    progFail();
+    status.textContent='Instagram scrape failed: '+e.message+'  (Run via "node server.mjs" at http://localhost:8000.)';
   }finally{
     btn.disabled=false; btn.style.opacity='1';
   }
@@ -535,7 +676,9 @@ function exportCSV(){
   const blob=new Blob([lines.join('\n')],{type:'text/csv;charset=utf-8'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
-  a.href=url; a.download=((VIEW&&VIEW.label)||'data').toLowerCase().replace(/[^a-z0-9]+/g,'_')+'_categorized.csv'; a.click();
+  // Name the export after the input file: "HOSTEL V1.csv" -> "HOSTEL V1_categorized.csv".
+  const base=(LAST_FILENAME||((VIEW&&VIEW.label)||'data')+'.csv').replace(/\.csv$/i,'');
+  a.href=url; a.download=base+'_categorized.csv'; a.click();
   URL.revokeObjectURL(url);
 }
 document.getElementById('exportBtn').addEventListener('click',exportCSV);
