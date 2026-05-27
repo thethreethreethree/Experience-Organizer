@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(node -e 'const fs=require\\(\"fs\"\\);const m=fs.readFileSync\\(\"index.html\",\"utf8\"\\).match\\(/<script>\\([\\\\s\\\\S]*\\)<\\\\/script>/\\);fs.writeFileSync\\(\"_c.mjs\",m[1]\\);')",
+      "Bash(node --check _c.mjs)",
+      "Bash(rm -f _c.mjs)"
     ]
   }
 }

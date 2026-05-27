@@ -434,7 +434,8 @@ function isRealPhoto(url){
 }
 // Some CSVs omit Activity Type / Description. Fall back to other columns so the app still works.
 function typeOf(r){ return r['Activity Type']||r['Industry']||r['Type']||''; }
-function descOf(r){ return r['Description']||r['Amenities']||''; }
+// "Pitch" is curated marketing copy in the refined CSV format - prefer it when present.
+function descOf(r){ return r['Pitch']||r['Description']||r['Amenities']||''; }
 // No-key fallback: a single OpenStreetMap map tile computed from lat/long.
 function osmStaticMap(lat,lon){
   lat=parseFloat(lat); lon=parseFloat(lon);
