@@ -1,6 +1,10 @@
-// Collect the first 3 posts (URL + thumbnail image) from each row's Instagram account,
-// using the logged-in session saved by ig-login.mjs (./.ig-session).
-// Adds columns: IG_Post_1..3 (post URLs) and IG_Img_1..3 (thumbnail image URLs).
+// Collect up to 6 thumbnail images from each row's Instagram account, using the
+// logged-in session saved by ig-login.mjs (./.ig-session). Each partner card shows
+// these as a swipeable horizontal strip so users can browse that partner's recent
+// IG posts without leaving the app. Visual only - no clickable links.
+//
+// Adds columns: IG_Img_1 .. IG_Img_6   (thumbnail URLs; CDN images expire after a
+// few weeks so re-run periodically to refresh).
 //
 // Run:  node ig-login.mjs           (once, to log in)
 //       node scrape-igposts.mjs [file.csv] [--inplace]
@@ -48,7 +52,9 @@ export async function enrichIgPosts(text, onProgress) {
   const titleIdx = headers.indexOf('Title');
   if (igIdx < 0) throw new Error('CSV needs an "Instagram" column');
 
-  const NEWCOLS = ['IG_Post_1', 'IG_Post_2', 'IG_Post_3', 'IG_Img_1', 'IG_Img_2', 'IG_Img_3'];
+  // Up to 6 thumbnails per partner - rendered as a per-card swipeable IG row.
+  // Per-post URLs are NOT collected (the field is visual only, no taps).
+  const NEWCOLS = ['IG_Img_1', 'IG_Img_2', 'IG_Img_3', 'IG_Img_4', 'IG_Img_5', 'IG_Img_6'];
   for (const col of NEWCOLS) if (!headers.includes(col)) { headers.push(col); for (let i = 1; i < rows.length; i++) rows[i].push(''); }
   const idx = Object.fromEntries(NEWCOLS.map(c => [c, headers.indexOf(c)]));
 
@@ -62,23 +68,26 @@ export async function enrichIgPosts(text, onProgress) {
   const cookies = await page.cookies('https://www.instagram.com');
   if (!cookies.some(c => c.name === 'sessionid' && c.value)) { await browser.close(); return { csv: toCSV(rows), done: 0, total: 0, loggedIn: false }; }
 
-  const firstPosts = async (handle) => {
+  // Pull up to 6 unique post thumbnail URLs from the profile grid (DOM order = most
+  // recent first). We ignore the post URLs themselves - users swipe within the card.
+  const firstThumbs = async (handle) => {
     await page.goto(`https://www.instagram.com/${handle}/`, { waitUntil: 'networkidle2', timeout: 40000 });
     await sleep(2500);
-    await page.evaluate(() => window.scrollBy(0, 700)).catch(() => {});
+    await page.evaluate(() => window.scrollBy(0, 900)).catch(() => {});
     await sleep(1500);
-    return await page.evaluate((handle) => {
-      const seen = new Set(), out = [];
+    return await page.evaluate(() => {
+      const seen = new Set(), imgs = [];
       for (const a of document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')) {
         const m = a.getAttribute('href').match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
         if (!m) continue;
-        const code = m[2]; if (seen.has(code)) continue; seen.add(code);
+        if (seen.has(m[2])) continue; seen.add(m[2]);
         const img = a.querySelector('img');
-        out.push({ url: `https://www.instagram.com/${handle}/${m[1]}/${code}/`, img: img ? (img.src || '') : '' });
-        if (out.length >= 3) break;
+        const src = img ? (img.currentSrc || img.src || '') : '';
+        if (src) imgs.push(src);
+        if (imgs.length >= 6) break;
       }
-      return out;
-    }, handle);
+      return imgs;
+    });
   };
 
   let done = 0, total = 0;
@@ -89,12 +98,13 @@ export async function enrichIgPosts(text, onProgress) {
     const name = r[titleIdx] || handle || `row ${i}`;
     if (!handle) continue;
     total++;
-    if (r[idx.IG_Post_1]) { if (onProgress) onProgress(name, -1); continue; } // already done
+    // Skip if thumbnails are already populated (re-runs only refresh empties).
+    if (r[idx.IG_Img_1]) { if (onProgress) onProgress(name, -1); continue; }
     let n = 0;
     try {
-      const posts = await firstPosts(handle);
-      posts.slice(0, 3).forEach((p, k) => { r[idx['IG_Post_' + (k + 1)]] = p.url; r[idx['IG_Img_' + (k + 1)]] = p.img; });
-      n = posts.length; if (n) done++;
+      const thumbs = await firstThumbs(handle);
+      thumbs.slice(0, 6).forEach((src, k) => { r[idx['IG_Img_' + (k + 1)]] = src; });
+      n = thumbs.length; if (n) done++;
     } catch {}
     if (onProgress) onProgress(name, n);
     await sleep(6000 + Math.floor(Math.random() * 3000));

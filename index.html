@@ -49,6 +49,12 @@
   .card .thumb{width:100%;height:140px;object-fit:cover;border-radius:6px;margin-bottom:8px;background:#0c0e12;display:block}
   .card .done{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:#22c55e;color:#04210f;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.5);z-index:2}
   .card.complete{border-color:#22c55e55}
+  /* Per-card IG swipe field: horizontal scroll of up to 6 of the partner's IG posts.
+     Visual only - no taps/links. Each image hides itself on error (expired CDN URL). */
+  .cardig{display:flex;gap:6px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;margin:8px 0 6px;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+  .cardig::-webkit-scrollbar{height:5px}
+  .cardig::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}
+  .cardig img{flex:0 0 auto;scroll-snap-align:start;width:110px;height:110px;border-radius:8px;object-fit:cover;background:#0c0e12;display:block;pointer-events:none}
   .card .t{font-weight:600;font-size:14px;line-height:1.3}
   .card .ty{color:var(--muted);font-size:11px;margin:2px 0 6px}
   .card .d{font-size:12px;color:#c4c9d6;line-height:1.4}
@@ -77,6 +83,10 @@
   @keyframes progshift{0%{background-position:0 0}100%{background-position:200% 0}}
   #progSpin{display:inline-block;width:13px;height:13px;border:2px solid #ffffff33;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}
   @keyframes spin{to{transform:rotate(360deg)}}
+  /* Export CSV is gated until a Fetch/Scrape completes. */
+  #exportBtn:disabled{opacity:.45;cursor:not-allowed;filter:grayscale(.4)}
+  #exportBtn.ready{box-shadow:0 0 0 2px #22c55e88;animation:readypulse 1.6s ease-out 1}
+  @keyframes readypulse{0%{box-shadow:0 0 0 0 #22c55ecc}100%{box-shadow:0 0 0 2px #22c55e88}}
   @media (max-width:900px){.columns{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
@@ -414,6 +424,7 @@ function render(){
     if(activeCat!=='all' && activeCat!==g.key){ el.innerHTML='<div class="empty">Filtered out</div>'; return; }
     el.innerHTML=list.length ? list.map(card).join('') : '<div class="empty">No matches</div>';
   });
+
 }
 
 // A row's Image is a real photo only if it's a Google user-content photo CDN link.
@@ -445,14 +456,20 @@ function imageFor(r){
   return osmStaticMap(r['Latitude'],r['Longitude']);
 }
 
-// A business is "done getting data" when it has both a real photo and an Instagram link.
+// A business is "done getting data" when it has both a real photo and an Instagram handle.
+// Thumbnails are intentionally NOT required - they're disposable cache (CDN URLs expire).
 function isComplete(r){
   return isRealPhoto(r['Image']) && /instagram\.com\/[A-Za-z0-9_.]+/.test(r['Instagram']||'');
 }
+// Extract a clean IG handle from a stored Instagram URL.
+function igHandleOf(r){
+  const m=(r['Instagram']||'').match(/instagram\.com\/([A-Za-z0-9_.]+)/);
+  return m ? m[1].replace(/\/$/, '') : '';
+}
 function card(r){
-  const map=r['Google Maps Link']?`<a href="${r['Google Maps Link']}" target="_blank">Maps</a>`:'';
-  const site=r['Website']?`<a href="${r['Website']}" target="_blank">Site</a>`:'';
-  const ig=/instagram\.com/.test(r['Instagram']||'')?`<a href="${escapeHTML(r['Instagram'])}" target="_blank">IG</a>`:'';
+  const map=r['Google Maps Link']?`<a href="${r['Google Maps Link']}" target="_blank" rel="noopener noreferrer">Maps</a>`:'';
+  const site=r['Website']?`<a href="${r['Website']}" target="_blank" rel="noopener noreferrer">Site</a>`:'';
+  const ig=/instagram\.com/.test(r['Instagram']||'')?`<a href="${escapeHTML(r['Instagram'])}" target="_blank" rel="noopener noreferrer">IG</a>`:'';
   const img=imageFor(r);
   const fallback=osmStaticMap(r['Latitude'],r['Longitude']);
   // On load error: try the map tile once; if that also fails (or none), hide the image.
@@ -463,12 +480,22 @@ function card(r){
     ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" onerror="${onerr}">`
     : '';
   const done=isComplete(r);
+  // Per-partner IG swipe field: up to 6 of THEIR recent post thumbnails. Visual only -
+  // users swipe horizontally to browse the partner's posts; no taps/links.
+  const handle=igHandleOf(r);
+  const thumbs=[1,2,3,4,5,6].map(i=>r['IG_Img_'+i]||'').filter(Boolean);
+  const igField=thumbs.length
+    ? `<div class="cardig" aria-label="${escapeHTML('@'+handle)} on Instagram">`+
+      thumbs.map(t=>`<img src="${escapeHTML(t)}" loading="lazy" alt="" referrerpolicy="no-referrer" onerror="this.style.display='none'">`).join('')+
+      `</div>`
+    : '';
   return `<div class="card${done?' complete':''}">
     ${done?'<div class="done" title="Data complete: photo + Instagram">✓</div>':''}
     ${imgHTML}
     <div class="t">${escapeHTML(r['Title'])}</div>
     <div class="ty">${escapeHTML(typeOf(r))}</div>
     <div class="d">${escapeHTML(descOf(r).slice(0,180))}</div>
+    ${igField}
     <div class="meta">
       <span><b>★ ${escapeHTML(r['Rating']||'-')}</b></span>
       <span>${escapeHTML(r['Reviews']||'(0)')} reviews</span>
@@ -483,6 +510,9 @@ function init(text,filename){
   LAST_CSV=text;
   if(filename) LAST_FILENAME=filename;
   DATA=parseCSV(text).map(r=>{r._cat=VIEW.classify(r);return r;});
+  // Fresh data load - Export stays gated until a Fetch/Scrape succeeds.
+  // (Scrape success handlers re-enable it AFTER calling init.)
+  setExportReady(false);
   // For dynamic views (Restaurants), build the category list from the data itself.
   if(VIEW.dynamic) VIEW.groups=groupsFromData();
   buildChrome();
@@ -566,6 +596,14 @@ dropInput.addEventListener('change',e=>loadFile(e.target.files[0]));
 ['dragleave','drop'].forEach(ev=>dropZone.addEventListener(ev,e=>{e.preventDefault();dropZone.classList.remove('drag');}));
 dropZone.addEventListener('drop',e=>{const f=e.dataTransfer.files[0]; if(f) loadFile(f);});
 
+// --- Export CSV gating: only enabled after a successful Fetch/Scrape ---
+function setExportReady(ready){
+  const btn=document.getElementById('exportBtn');
+  btn.disabled=!ready;
+  btn.classList.toggle('ready',!!ready);
+  btn.title=ready?'Your file is ready - click to save':'Run "Fetch real photos" or "Scrape IG" first';
+}
+
 // --- Scrape progress bar (indeterminate while the server works, green on finish) ---
 function progStart(title,phase){
   document.getElementById('progTitle').textContent=title||'Working…';
@@ -609,8 +647,9 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
     const enriched=await res.text();
     const filled=res.headers.get('X-Filled'), total=res.headers.get('X-Total');
     init(enriched, LAST_FILENAME);
+    setExportReady(true);
     progDone();
-    status.textContent=`Done - filled ${filled}/${total} photos. Use Export CSV to save the enriched file.`;
+    status.textContent=`Done - filled ${filled}/${total} photos. Your file is ready - click Export CSV to save.`;
   }catch(e){
     progFail();
     status.textContent='Photo fetch failed: '+e.message+'  (Are you running it via "node server.mjs" at http://localhost:8000? It will not work from file://)';
@@ -631,7 +670,7 @@ document.getElementById('igBtn').addEventListener('click',async()=>{
   }
   const missing=DATA.filter(r=>!(r['Instagram']||'').includes('instagram.com')).length;
   const withIg=DATA.length-missing;
-  status.textContent=`Scraping Instagram: finding handles for ${missing} place(s), then collecting first-3 posts for accounts that have a handle (needs IG login). This can take several minutes. Watch the server console. Do NOT refresh.`;
+  status.textContent=`Scraping Instagram: finding handles for ${missing} place(s), then refreshing IG thumbnails for accounts that have a handle (needs IG login). This can take several minutes. Watch the server console. Do NOT refresh.`;
   btn.disabled=true; btn.style.opacity='.6';
   progStart('Scraping Instagram…',`handles + posts`);
   try{
@@ -641,9 +680,10 @@ document.getElementById('igBtn').addEventListener('click',async()=>{
     const filled=res.headers.get('X-Filled'), already=res.headers.get('X-Already');
     const posts=res.headers.get('X-Posts'), loggedIn=res.headers.get('X-LoggedIn')==='true';
     init(enriched, LAST_FILENAME);
+    setExportReady(true);
     progDone();
     status.textContent=`Done - ${filled} new handle(s) found (${already} already had one). `+
-      (loggedIn?`Collected first-3 posts for ${posts} account(s).`:`Posts skipped - log in to Instagram on the home page first.`)+` Use Export CSV to save.`;
+      (loggedIn?`Refreshed IG thumbnails for ${posts} account(s).`:`Thumbnails skipped - log in to Instagram on the home page first.`)+` Your file is ready - click Export CSV to save.`;
   }catch(e){
     progFail();
     status.textContent='Instagram scrape failed: '+e.message+'  (Run via "node server.mjs" at http://localhost:8000.)';
