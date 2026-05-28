@@ -97,9 +97,16 @@ export async function enrichCsv(text, onProgress) {
     // A real place photo: googleusercontent with a long photo token. Exclude tiny avatars.
     const isReal = s => /googleusercontent\.com\/(gps-cs|gps-proxy|gpc|p\/|proxy|a-\/|a\/)/.test(s)
       || /lh[3-6]\.googleusercontent\.com\/[A-Za-z0-9_-]{12,}/.test(s);
-    const isAvatar = s => /default_user/.test(s)
-      || /=w\d+-h\d+-p\b/.test(s)            // profile-cropped thumbs (=w32-h32-p...)
-      || /=s(?:16|24|32|40|48|50|64|72|96|100|120)\b/.test(s);
+    // True avatars are tiny (<=96px) - don't filter by the "-p-" modifier any more,
+    // because Google now serves regular grid thumbs with -p- too (e.g. =w156-h114-p-k-no).
+    // We always upscale to =s1600 before saving, so a small-thumb URL is fine to accept.
+    const isAvatar = s => {
+      if (/default_user/.test(s)) return true;
+      if (/=s(?:16|24|32|40|48|50|64|72|96|100|120)\b/.test(s)) return true;
+      const wh = s.match(/=w(\d+)-h(\d+)/);
+      if (wh && +wh[1] <= 96 && +wh[2] <= 96) return true;
+      return false;
+    };
     // Rough "resolution" score so we prefer the biggest available image.
     const sizeOf = s => {
       const w = s.match(/=w(\d+)/), h = s.match(/=h(\d+)/), ss = s.match(/=s(\d+)/);
@@ -117,9 +124,24 @@ export async function enrichCsv(text, onProgress) {
     return base + '=s1600';
   };
 
-  // Fetch one place with up to 2 navigation attempts (handles rate-limit/timeouts).
-  const fetchPhoto = async (link) => {
+  // Extract a Place ID from a Google Maps URL. The "!19sChIJ..." segment is the
+  // place_id; URLs built around place_id resolve reliably while raw "data=" URLs
+  // go stale and stop loading the place panel.
+  const placeIdOf = u => {
+    const m = (u || '').match(/!19s(Ch[A-Za-z0-9_-]+)/);
+    return m ? m[1] : '';
+  };
+
+  // Fetch one place with up to 3 navigation attempts. We always try the durable
+  // place_id URL first; if that fails (or no place_id available) we fall back to
+  // the original link from the CSV.
+  const fetchPhoto = async (originalLink) => {
+    const pid = placeIdOf(originalLink);
+    const urls = pid
+      ? [`https://www.google.com/maps/place/?q=place_id:${pid}&hl=en`, originalLink]
+      : [originalLink];
     for (let attempt = 0; attempt < 3; attempt++) {
+      const link = urls[Math.min(attempt, urls.length - 1)];
       try {
         await page.goto(link, { waitUntil: 'networkidle2', timeout: 60000 });
         await acceptConsent();
@@ -128,12 +150,26 @@ export async function enrichCsv(text, onProgress) {
           () => document.title && !/^Google Maps/.test(document.title),
           { timeout: 20000 }
         ).catch(() => {});
-        // Wait for the place heading too (where the hero photo lives).
+        // Wait for the place heading.
         await page.waitForSelector('h1', { timeout: 8000 }).catch(() => {});
-        await sleep(1800);
-        await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
-        await sleep(1000);
+        await sleep(1500);
+        // Wait for a real photo URL token to appear (raw substring - HTML often has
+        // escaped slashes that would fail a strict-URL regex).
+        await page.waitForFunction(() => {
+          const html = document.documentElement.outerHTML;
+          return /gps-cs|gps-proxy|googleusercontent\.com[^"']*gpc/.test(html);
+        }, { timeout: 12000 }).catch(() => {});
+        // Settle: the URL appears in HTML before the DOM <img> tag actually mounts.
+        // A full settle window catches single-photo places like small hostels.
+        await sleep(2200);
+        // First extraction attempt BEFORE scrolling - some places have a single photo
+        // that gets evicted from the DOM when we scroll away from it.
         let photo = await page.evaluate(extractInPage);
+        if (photo) return upscale(photo);
+        // Scroll to trigger lazy-loading on grids with many photos, then re-extract.
+        await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
+        await sleep(1200);
+        photo = await page.evaluate(extractInPage);
         if (photo) return upscale(photo);
         // Last resort: click the hero/photo button to open the gallery, then re-extract.
         try {
@@ -149,7 +185,16 @@ export async function enrichCsv(text, onProgress) {
     return '';
   };
 
-  let filled = 0;
+  // A cell is "already a real photo" if it's a Google user-content URL or a
+  // streetview thumbnail and not the well-known "default_user" placeholder.
+  // Such cells are left untouched - we never downgrade good user-supplied images.
+  const isRealAlready = u => {
+    if (!u) return false;
+    if (/default_user|placeholder/i.test(u)) return false;
+    return /lh[3-6]\.googleusercontent\.com|googleusercontent\.com\/(gps-cs|gps-proxy|gpc|p\/|proxy)|streetviewpixels-pa\.googleapis\.com/.test(u);
+  };
+
+  let filled = 0, kept = 0;
   const total = rows.length - 1;
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
@@ -157,6 +202,12 @@ export async function enrichCsv(text, onProgress) {
     const link = r[linkIdx];
     const title = r[titleIdx] || `row ${i}`;
     let ok = false;
+    if (isRealAlready(r[imgIdx])) {
+      // Keep the existing photo - don't touch it.
+      kept++; ok = true;
+      if (onProgress) onProgress(title, ok, i, total);
+      continue;
+    }
     if (link) {
       const photo = await fetchPhoto(link);
       if (photo) { r[imgIdx] = photo; filled++; ok = true; }

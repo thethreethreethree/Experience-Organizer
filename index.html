@@ -477,8 +477,11 @@ function card(r){
   const onerr = fallback && img!==fallback
     ? `this.onerror=function(){this.style.display='none'};this.src='${escapeHTML(fallback)}';`
     : `this.onerror=null;this.style.display='none';`;
+  // referrerpolicy="no-referrer" - Google's CDN refuses to serve when the browser
+  // sends a localhost (or non-google) Referer header. Without this, many images
+  // come back blank even though the URL is valid.
   const imgHTML=img
-    ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" onerror="${onerr}">`
+    ? `<img class="thumb" src="${escapeHTML(img)}" loading="lazy" alt="" referrerpolicy="no-referrer" onerror="${onerr}">`
     : '';
   const done=isComplete(r);
   // Per-partner IG swipe field: up to 6 of THEIR recent post thumbnails. Visual only -
@@ -539,24 +542,20 @@ function openView(key){
   const body=document.getElementById('appBody'), soon=document.getElementById('comingSoon');
   if(VIEW.comingSoon){ body.style.display='none'; soon.style.display='block'; return; }
   body.style.display='block'; soon.style.display='none';
-  activeCat='all'; DATA=[]; LAST_CSV='';
-  LAST_FILENAME=(VIEW.csv||'').split('/').pop()||'';
-  // Clear any prior chrome until data loads (init() rebuilds it).
+  activeCat='all'; DATA=[]; LAST_CSV=''; LAST_FILENAME='';
+  // Clear all prior chrome - we never auto-load a seed file any more, so each session
+  // starts fresh. The user uploads exactly the file they want via the drop zone.
   document.getElementById('stats').innerHTML='';
   document.getElementById('columns').innerHTML='';
   document.getElementById('catChips').innerHTML='';
+  document.getElementById('loadError').style.display='none';
   const status=document.getElementById('photoStatus'); if(status){status.style.display='none';}
-  fetch(VIEW.csv).then(r=>{ if(!r.ok) throw new Error(r.status); return r.text(); })
-    .then(t=>init(t, LAST_FILENAME))
-    .catch(()=>{
-      document.getElementById('loadError').style.display='block';
-      document.getElementById('filePicker').onchange=e=>{
-        const f=e.target.files[0]; if(!f) return;
-        const reader=new FileReader();
-        reader.onload=ev=>{document.getElementById('loadError').style.display='none';init(ev.target.result, f.name);};
-        reader.readAsText(f);
-      };
-    });
+  setExportReady(false);
+  // Surface a clear drop prompt. No background fetch of any on-disk seed.
+  const dz=document.getElementById('dropZone');
+  dz.querySelector('strong').textContent='Drop your CSV for '+VIEW.label;
+  const hint=dz.querySelector('.hint');
+  if(hint) hint.textContent='Each upload is an independent session - nothing is reused from previous files.';
 }
 document.querySelectorAll('.pick').forEach(p=>p.addEventListener('click',()=>{
   const key=p.dataset.view;
