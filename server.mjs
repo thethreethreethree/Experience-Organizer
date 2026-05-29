@@ -53,6 +53,55 @@ const server = createServer(async (req, res) => {
       }
       return;
     }
+    if (req.method === 'POST' && req.url === '/scrape-instagram-stream') {
+      // Same pipeline as /scrape-instagram, but streams per-row events as
+      // newline-delimited JSON so the extension can render live progress.
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', async () => {
+        res.writeHead(200, {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          'Access-Control-Allow-Origin': '*',
+        });
+        const send = (ev) => { try { res.write(JSON.stringify(ev) + '\n'); } catch {} };
+        try {
+          // Pre-count rows so the client can size the progress bar.
+          const total = Math.max(
+            0,
+            body.split('\n').filter((l) => l.trim().length).length - 1,
+          );
+          send({ type: 'start', phase: 'instagram', total });
+          console.log(`IG stream: ${total} rows`);
+
+          const r1 = await enrichInstagram(body, (name, handle, saw) => {
+            send({ type: 'ig-row', name, handle: handle || '', saw: (saw || []).slice(0, 4) });
+          });
+          send({
+            type: 'phase', phase: 'igposts',
+            total: r1.total, filled: r1.filled, already: r1.already,
+          });
+
+          const r2 = await enrichIgPosts(r1.csv, (name, n) => {
+            send({ type: 'igposts-row', name, count: n, already: n === -1 });
+          });
+          send({
+            type: 'done',
+            csv: r2.csv,
+            filled: r1.filled, already: r1.already, total: r1.total,
+            posts: r2.done, loggedIn: r2.loggedIn,
+          });
+        } catch (e) {
+          console.error('Stream error:', e.message);
+          send({ type: 'error', message: e.message });
+        } finally {
+          res.end();
+        }
+      });
+      return;
+    }
     if (req.method === 'POST' && req.url === '/scrape-instagram') {
       let body = '';
       req.on('data', c => { body += c; });
