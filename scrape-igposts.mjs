@@ -44,7 +44,9 @@ export function hasIgSession() { return existsSync(userDataDir); }
 
 // Collect first-3 posts for each row with an IG handle. Reuses the saved login session.
 // Returns { csv, done, total, loggedIn }. If not logged in, returns the CSV unchanged.
-export async function enrichIgPosts(text, onProgress) {
+// opts.shouldPause: async () => boolean — blocks between rows when paused.
+export async function enrichIgPosts(text, onProgress, opts = {}) {
+  const shouldPause = opts.shouldPause || (async () => false);
   if (!CHROME) throw new Error('No Chrome/Edge found.');
   const rows = parseCSV(text);
   const headers = rows[0];
@@ -106,7 +108,8 @@ export async function enrichIgPosts(text, onProgress) {
       thumbs.slice(0, 6).forEach((src, k) => { r[idx['IG_Img_' + (k + 1)]] = src; });
       n = thumbs.length; if (n) done++;
     } catch {}
-    if (onProgress) onProgress(name, n);
+    if (onProgress) await onProgress(name, n, toCSV(rows));
+    await shouldPause();
     await sleep(6000 + Math.floor(Math.random() * 3000));
   }
   await browser.close();

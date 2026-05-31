@@ -153,8 +153,11 @@ async function viaGoogle(name) {
 }
 
 // Enrich CSV text: fill empty Instagram cells. Returns { csv, filled, already, total }.
-// onProgress(name, handleOrEmpty, sawList) is called per row (optional).
-export async function enrichInstagram(text, onProgress) {
+// onProgress(name, handleOrEmpty, sawList, currentCsv) is called per row (optional).
+// opts.shouldPause: async () => boolean. Called between rows; if returns true,
+//   we BLOCK until it returns false. Used by server.mjs to pause/resume.
+export async function enrichInstagram(text, onProgress, opts = {}) {
+  const shouldPause = opts.shouldPause || (async () => false);
   const rows = parseCSV(text);
   const headers = rows[0];
   const igIdx = headers.indexOf('Instagram');
@@ -186,7 +189,9 @@ export async function enrichInstagram(text, onProgress) {
     if (!h) { all.push(...await viaGoogle(name)); tryAccept(); }
 
     if (h) { r[igIdx] = igUrl(h); filled++; }
-    if (onProgress) onProgress(name, h, [...new Set(all)]);
+    if (onProgress) await onProgress(name, h, [...new Set(all)], toCSV(rows));
+    // Block here if the server has been paused (server.mjs sets the flag).
+    await shouldPause();
     await sleep(3500 + Math.floor(Math.random() * 2000));
   }
   if (browser) { try { await browser.close(); } catch {} browser = null; page = null; }
