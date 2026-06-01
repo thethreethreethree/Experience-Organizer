@@ -37,7 +37,10 @@ const csvField = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v
 const toCSV = rows => rows.map(r => r.map(csvField).join(',')).join('\n');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Enrich CSV text -> { csv, filled, total }. onProgress(title, ok, idx, total) optional.
+// Enrich CSV text -> { csv, filled, total }.
+//   onProgress(title, ok, idx, total, csvSoFar) called per row (optional).
+//   The 5th arg `csvSoFar` is the serialized CSV of all rows so far - the server uses
+//   it to keep LATEST_CSV_SNAPSHOT current so /dump-current can return live state.
 export async function enrichCsv(text, onProgress) {
   const chromePath = findChrome();
   if (!chromePath) throw new Error('No Chrome/Edge found. Edit CHROME_CANDIDATES in scrape-photos.mjs.');
@@ -205,14 +208,15 @@ export async function enrichCsv(text, onProgress) {
     if (isRealAlready(r[imgIdx])) {
       // Keep the existing photo - don't touch it.
       kept++; ok = true;
-      if (onProgress) onProgress(title, ok, i, total);
+      if (onProgress) onProgress(title, ok, i, total, toCSV(rows));
       continue;
     }
     if (link) {
       const photo = await fetchPhoto(link);
       if (photo) { r[imgIdx] = photo; filled++; ok = true; }
     }
-    if (onProgress) onProgress(title, ok, i, total);
+    // Pass csvSoFar as 5th arg so the server can update its live snapshot.
+    if (onProgress) onProgress(title, ok, i, total, toCSV(rows));
     await sleep(700);
   }
   await browser.close();

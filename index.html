@@ -563,28 +563,52 @@ function readSession(){
 function clearSession(){ try{ localStorage.removeItem(SESSION_KEY); }catch{} }
 
 // --- View switching ---
-function showLanding(){
+// We track which source the restore panel is currently offering: 'partial' (server's
+// mid-scrape snapshot from disk - freshest) wins over 'session' (browser localStorage).
+let PENDING_RESTORE=null;
+async function showLanding(){
   document.getElementById('app').style.display='none';
   document.getElementById('landing').style.display='block';
-  // Surface the restore offer if there's a saved session.
-  const s=readSession(), panel=document.getElementById('restorePanel');
-  if(s && s.csv && VIEWS[s.viewKey]){
-    const v=VIEWS[s.viewKey], when=new Date(s.ts);
-    document.getElementById('restoreInfo').textContent=
-      `${v.label} · ${s.filename||'(untitled)'} · saved ${when.toLocaleString()}`;
+  const panel=document.getElementById('restorePanel');
+  const info=document.getElementById('restoreInfo');
+  const local=readSession();
+  PENDING_RESTORE=null;
+  // 1) Prefer the server's on-disk partial - it's the freshest state after a crash.
+  let partialCsv='';
+  try{ const r=await fetch('/partial-csv',{cache:'no-store'}); if(r.ok){ partialCsv=await r.text(); } }catch{}
+  if(partialCsv && partialCsv.length>50){
+    // Use the local session's view+filename as labels for the partial - it's the same dataset.
+    const v=local && VIEWS[local.viewKey] ? VIEWS[local.viewKey] : (VIEWS.stays);
+    const label=local?.filename || '(in-progress upload)';
+    PENDING_RESTORE={ source:'partial', viewKey: local?.viewKey || 'stays', csv: partialCsv, filename: label };
+    info.textContent=`Mid-scrape progress recovered from disk · ${v.label} · ${label}`;
     panel.style.display='block';
-  } else { panel.style.display='none'; }
+    return;
+  }
+  // 2) Otherwise fall back to the browser's last completed session.
+  if(local && local.csv && VIEWS[local.viewKey]){
+    const v=VIEWS[local.viewKey], when=new Date(local.ts);
+    PENDING_RESTORE={ source:'session', viewKey: local.viewKey, csv: local.csv, filename: local.filename||'' };
+    info.textContent=`${v.label} · ${local.filename||'(untitled)'} · saved ${when.toLocaleString()}`;
+    panel.style.display='block';
+    return;
+  }
+  panel.style.display='none';
 }
 // Restore the previously saved session straight into its view.
 function restoreLastSession(){
-  const s=readSession(); if(!s||!VIEWS[s.viewKey]) return;
-  openView(s.viewKey);
-  // openView clears LAST_*; reinit from saved CSV so saveSession() refreshes the timestamp.
-  setTimeout(()=>{ init(s.csv, s.filename); }, 0);
+  const r=PENDING_RESTORE; if(!r||!VIEWS[r.viewKey]) return;
+  openView(r.viewKey);
+  // openView clears LAST_*; reinit from the chosen CSV so saveSession() captures it.
+  setTimeout(()=>{ init(r.csv, r.filename); }, 0);
 }
 document.getElementById('restoreBtn').addEventListener('click',restoreLastSession);
-document.getElementById('discardBtn').addEventListener('click',()=>{
-  clearSession(); document.getElementById('restorePanel').style.display='none';
+document.getElementById('discardBtn').addEventListener('click',async()=>{
+  clearSession();
+  // Also wipe the server's disk partial - otherwise the panel comes back on next visit.
+  try{ await fetch('/clear-partial',{method:'POST'}); }catch{}
+  document.getElementById('restorePanel').style.display='none';
+  PENDING_RESTORE=null;
 });
 function openView(key){
   VIEW=VIEWS[key];
@@ -693,7 +717,28 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
   }
   status.textContent=`Launching Chrome and fetching photos for ${linksCount} places... this can take a few minutes (~2s each). Watch the server console for detail. Do NOT refresh.`;
   btn.disabled=true; btn.style.opacity='.6';
-  progStart('Fetching photos…',`${linksCount} places`);
+  progStart('Fetching photos…',`0 / ${linksCount}`);
+  // Live progress: poll /dump-current every 2s while the scrape runs. Each poll
+  // pulls the server's in-progress CSV snapshot; we count rows whose Image is a
+  // real photo URL, and update the bar + status. Stops when the POST returns.
+  let stopPoll=false;
+  (async()=>{
+    while(!stopPoll){
+      try{
+        const r=await fetch('/dump-current',{cache:'no-store'});
+        if(r.ok){
+          const text=await r.text();
+          if(text&&text.length>50){
+            const live=parseCSV(text);
+            const done=live.filter(row=>isRealPhoto(row['Image'])).length;
+            progPhase(`${done} / ${linksCount}`);
+            status.textContent=`Working… ${done} of ${linksCount} photos so far. (Live - the in-memory dataset is also being saved to data/_local_enrichment.partial.csv every 5s.)`;
+          }
+        }
+      }catch{}
+      await new Promise(r=>setTimeout(r,2000));
+    }
+  })();
   try{
     const res=await fetch('/scrape',{method:'POST',headers:{'Content-Type':'text/csv'},body:LAST_CSV});
     if(!res.ok) throw new Error(await res.text());
@@ -707,6 +752,7 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
     progFail();
     status.textContent='Photo fetch failed: '+e.message+'  (Are you running it via "node server.mjs" at http://localhost:8000? It will not work from file://)';
   }finally{
+    stopPoll=true;
     btn.disabled=false; btn.style.opacity='1';
   }
 });
@@ -723,20 +769,38 @@ document.getElementById('igBtn').addEventListener('click',async()=>{
   }
   const missing=DATA.filter(r=>!(r['Instagram']||'').includes('instagram.com')).length;
   const withIg=DATA.length-missing;
-  status.textContent=`Scraping Instagram: finding handles for ${missing} place(s), then refreshing IG thumbnails for accounts that have a handle (needs IG login). This can take several minutes. Watch the server console. Do NOT refresh.`;
+  status.textContent=`Scraping Instagram: finding handles for ${missing} place(s), then refreshing IG thumbnails. Live row-by-row progress below.`;
   btn.disabled=true; btn.style.opacity='.6';
-  progStart('Scraping Instagram…',`handles + posts`);
+  progStart('Scraping Instagram…','starting…');
   try{
-    const res=await fetch('/scrape-instagram',{method:'POST',headers:{'Content-Type':'text/csv'},body:LAST_CSV});
+    // Switch to the STREAMING endpoint - lets us update progress per row instead
+    // of waiting until the whole job returns. Events are newline-delimited JSON.
+    const res=await fetch('/scrape-instagram-stream',{method:'POST',headers:{'Content-Type':'text/csv'},body:LAST_CSV});
     if(!res.ok) throw new Error(await res.text());
-    const enriched=await res.text();
-    const filled=res.headers.get('X-Filled'), already=res.headers.get('X-Already');
-    const posts=res.headers.get('X-Posts'), loggedIn=res.headers.get('X-LoggedIn')==='true';
-    init(enriched, LAST_FILENAME);
+    const reader=res.body.getReader(), dec=new TextDecoder();
+    let buf='', phase='handles', total=0, doneCount=0, foundHandles=0, alreadyHandles=0, postsDone=0, loggedIn=false, finalCsv='';
+    while(true){
+      const {done,value}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      let nl;
+      while((nl=buf.indexOf('\n'))>=0){
+        const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+        if(!line) continue;
+        let ev; try{ ev=JSON.parse(line); }catch{ continue; }
+        if(ev.type==='start'){ total=ev.total||0; doneCount=0; phase='handles'; progPhase(`Handles: 0 / ${total}`); }
+        else if(ev.type==='ig-row'){ doneCount++; if(ev.handle) foundHandles++; progPhase(`Handles: ${doneCount} / ${total} (${foundHandles} found)`); status.textContent=`Handles ${doneCount}/${total} - last: ${ev.name}${ev.handle?' → @'+ev.handle:''}`; }
+        else if(ev.type==='phase'){ phase='posts'; doneCount=0; total=ev.total||total; alreadyHandles=ev.already||0; foundHandles=ev.filled||foundHandles; progPhase(`Posts: 0 / ${total}`); }
+        else if(ev.type==='igposts-row'){ doneCount++; if(ev.count>0) postsDone++; progPhase(`Posts: ${doneCount} / ${total} (${postsDone} got thumbnails)`); status.textContent=`Posts ${doneCount}/${total} - last: ${ev.name}${ev.already?' (already)':ev.count>0?' ✓':' (none)'}`; }
+        else if(ev.type==='done'){ finalCsv=ev.csv||''; foundHandles=ev.filled||foundHandles; alreadyHandles=ev.already||alreadyHandles; postsDone=ev.posts||postsDone; loggedIn=!!ev.loggedIn; }
+        else if(ev.type==='error'){ throw new Error(ev.message||'stream error'); }
+      }
+    }
+    if(!finalCsv) throw new Error('Stream ended without a final result');
+    init(finalCsv, LAST_FILENAME);
     setExportReady(true);
     progDone();
-    status.textContent=`Done - ${filled} new handle(s) found (${already} already had one). `+
-      (loggedIn?`Refreshed IG thumbnails for ${posts} account(s).`:`Thumbnails skipped - log in to Instagram on the home page first.`)+` Your file is ready - click Export CSV to save.`;
+    status.textContent=`Done - ${foundHandles} new handle(s) found (${alreadyHandles} already had one). `+
+      (loggedIn?`Collected first thumbnails for ${postsDone} account(s).`:`Thumbnails skipped - log in to Instagram on the home page first.`)+` Your file is ready - click Export CSV to save.`;
   }catch(e){
     progFail();
     status.textContent='Instagram scrape failed: '+e.message+'  (Run via "node server.mjs" at http://localhost:8000.)';

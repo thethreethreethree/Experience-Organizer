@@ -6,15 +6,14 @@
 // Run:  node server.mjs    then open http://localhost:8000
 
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { extname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { enrichCsv } from './scrape-photos.mjs';
 import { enrichInstagram } from './scrape-instagram.mjs';
 import { enrichIgPosts } from './scrape-igposts.mjs';
-
-import { writeFile } from 'node:fs/promises';
 
 const ROOT = new URL('./', import.meta.url);
 const PORT = 8000;
@@ -47,8 +46,15 @@ async function partialSave(csv, force) {
 
 // Latest in-memory snapshot of the running enrichment. Updated by every
 // onProgress callback so /dump-current can return it on demand without
-// waiting for the run to finish.
+// waiting for the run to finish. Re-seeded from disk on startup so a server
+// restart doesn't drop a recovered state on the floor.
 let LATEST_CSV_SNAPSHOT = '';
+try {
+  if (existsSync(PARTIAL_PATH)) {
+    LATEST_CSV_SNAPSHOT = await readFile(PARTIAL_PATH, 'utf8');
+    console.log(`Recovered partial snapshot from disk (${LATEST_CSV_SNAPSHOT.length} bytes).`);
+  }
+} catch {}
 
 const server = createServer(async (req, res) => {
   try {
@@ -58,7 +64,14 @@ const server = createServer(async (req, res) => {
       req.on('end', async () => {
         try {
           console.log('Scrape request received - launching Chrome...');
-          const { csv, filled, total } = await enrichCsv(body, (title, ok) => console.log(`${ok ? '✓' : '·'} ${title}`));
+          // Initialize live snapshot so /dump-current can serve progress immediately.
+          LATEST_CSV_SNAPSHOT = body;
+          const { csv, filled, total } = await enrichCsv(body, async (title, ok, i, tot, csvSoFar) => {
+            console.log(`${ok ? '✓' : '·'} ${title}`);
+            if (csvSoFar) { LATEST_CSV_SNAPSHOT = csvSoFar; await partialSave(csvSoFar); }
+          });
+          LATEST_CSV_SNAPSHOT = csv;
+          await partialSave(csv, true);
           console.log(`Done: ${filled}/${total} photos.`);
           res.writeHead(200, { 'Content-Type': 'text/csv', 'X-Filled': String(filled), 'X-Total': String(total) });
           res.end(csv);
@@ -95,6 +108,24 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/scrape-status') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
       res.end(JSON.stringify({ paused: LOCAL_PAUSED, hasSnapshot: !!LATEST_CSV_SNAPSHOT }));
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/partial-csv') {
+      // Return the persisted partial CSV from disk - this survives a server crash
+      // and is the most recent state a mid-scrape interruption could have saved.
+      try {
+        const data = await readFile(PARTIAL_PATH, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+        res.end(data);
+      } catch {
+        res.writeHead(404); res.end('no partial');
+      }
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/clear-partial') {
+      // Called after the user explicitly chooses to discard the recovered state.
+      try { const { rm } = await import('node:fs/promises'); await rm(PARTIAL_PATH, { force: true }); } catch {}
+      res.writeHead(200, { 'Access-Control-Allow-Origin': '*' }); res.end('ok');
       return;
     }
     if (req.method === 'GET' && req.url === '/dump-current') {
