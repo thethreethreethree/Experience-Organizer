@@ -118,6 +118,17 @@
     <span style="font-size:12px;color:var(--muted)">Opens a Chrome window to sign in (use a secondary account). Needed before scraping IG posts. Your session is saved locally; your password is never seen by this app.</span>
   </div>
   <div id="igLoginStatus" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
+  <div id="restorePanel" style="display:none;margin-top:22px;background:#1a2516;border:1px solid #2c4a23;border-radius:12px;padding:14px 16px">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <span style="font-size:22px">💾</span>
+      <div style="flex:1;min-width:200px">
+        <div style="font-size:14px;font-weight:600">Continue your last session?</div>
+        <div id="restoreInfo" style="font-size:12px;color:var(--muted);margin-top:2px"></div>
+      </div>
+      <button id="restoreBtn" style="background:#22c55e;color:#04210f;border:0;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer">Continue</button>
+      <button id="discardBtn" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer">Start fresh</button>
+    </div>
+  </div>
 </section>
 
 <!-- APP -->
@@ -526,13 +537,55 @@ function init(text,filename){
   const types=[...new Set(DATA.map(r=>typeOf(r)).filter(Boolean))].sort();
   types.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);});
   render();
+  // Fallback: persist this state so a refresh/crash/interruption doesn't wipe progress.
+  saveSession();
 }
+
+// --- Session fallback (localStorage) ---
+// Saves: which view, which file, the CSV contents, and a timestamp.
+// Restore is OPT-IN at the landing page so the past never silently bleeds into
+// a new session - independence preserved, but nothing is ever lost on a crash.
+const SESSION_KEY='dcs_lastSession_v1';
+function viewKeyOf(view){ return Object.entries(VIEWS).find(([,v])=>v===view)?.[0] || ''; }
+function saveSession(){
+  if(!VIEW||!LAST_CSV) return;
+  const key=viewKeyOf(VIEW); if(!key) return;
+  try{
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      viewKey:key, filename:LAST_FILENAME||'', csv:LAST_CSV,
+      ts:new Date().toISOString(),
+    }));
+  }catch(e){ /* quota exceeded - silent; in-memory state still good */ }
+}
+function readSession(){
+  try{ const raw=localStorage.getItem(SESSION_KEY); return raw?JSON.parse(raw):null; }catch{ return null; }
+}
+function clearSession(){ try{ localStorage.removeItem(SESSION_KEY); }catch{} }
 
 // --- View switching ---
 function showLanding(){
   document.getElementById('app').style.display='none';
   document.getElementById('landing').style.display='block';
+  // Surface the restore offer if there's a saved session.
+  const s=readSession(), panel=document.getElementById('restorePanel');
+  if(s && s.csv && VIEWS[s.viewKey]){
+    const v=VIEWS[s.viewKey], when=new Date(s.ts);
+    document.getElementById('restoreInfo').textContent=
+      `${v.label} · ${s.filename||'(untitled)'} · saved ${when.toLocaleString()}`;
+    panel.style.display='block';
+  } else { panel.style.display='none'; }
 }
+// Restore the previously saved session straight into its view.
+function restoreLastSession(){
+  const s=readSession(); if(!s||!VIEWS[s.viewKey]) return;
+  openView(s.viewKey);
+  // openView clears LAST_*; reinit from saved CSV so saveSession() refreshes the timestamp.
+  setTimeout(()=>{ init(s.csv, s.filename); }, 0);
+}
+document.getElementById('restoreBtn').addEventListener('click',restoreLastSession);
+document.getElementById('discardBtn').addEventListener('click',()=>{
+  clearSession(); document.getElementById('restorePanel').style.display='none';
+});
 function openView(key){
   VIEW=VIEWS[key];
   document.getElementById('landing').style.display='none';
