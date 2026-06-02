@@ -228,7 +228,13 @@ const server = createServer(async (req, res) => {
     if (path === '/') path = '/index.html';
     const file = new URL('.' + path, ROOT);
     const data = await readFile(file);
-    res.writeHead(200, { 'Content-Type': TYPES[extname(path)] || 'application/octet-stream' });
+    // Never let the browser cache the HTML or our JS - we edit them often and a
+    // stale copy will make the page silently run obsolete logic with no visible cue.
+    const ext = extname(path);
+    const noCache = (ext === '.html' || ext === '.js' || ext === '.mjs');
+    const headers = { 'Content-Type': TYPES[ext] || 'application/octet-stream' };
+    if (noCache) { headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'; headers['Pragma'] = 'no-cache'; headers['Expires'] = '0'; }
+    res.writeHead(200, headers);
     res.end(data);
   } catch {
     res.writeHead(404); res.end('Not found');
