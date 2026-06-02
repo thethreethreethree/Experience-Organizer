@@ -199,6 +199,12 @@ export async function enrichCsv(text, onProgress) {
 
   let filled = 0, kept = 0;
   const total = rows.length - 1;
+  // Snapshot throttling - generating the full CSV string per row on a 5000-row
+  // dataset blows up V8's heap (5000 * 3.6 MB allocations). We only serialize
+  // when at least 5s has passed since the last snapshot.
+  let lastSnap = 0;
+  const SNAP_EVERY = 5000;
+  const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.length <= linkIdx) continue;
@@ -208,7 +214,7 @@ export async function enrichCsv(text, onProgress) {
     if (isRealAlready(r[imgIdx])) {
       // Keep the existing photo - don't touch it.
       kept++; ok = true;
-      if (onProgress) onProgress(title, ok, i, total, toCSV(rows));
+      if (onProgress) onProgress(title, ok, i, total, maybeSnap());
       continue;
     }
     if (link) {
@@ -216,7 +222,8 @@ export async function enrichCsv(text, onProgress) {
       if (photo) { r[imgIdx] = photo; filled++; ok = true; }
     }
     // Pass csvSoFar as 5th arg so the server can update its live snapshot.
-    if (onProgress) onProgress(title, ok, i, total, toCSV(rows));
+    // maybeSnap() throttles full-CSV allocation to once per 5s.
+    if (onProgress) onProgress(title, ok, i, total, maybeSnap());
     await sleep(700);
   }
   await browser.close();

@@ -93,6 +93,11 @@ export async function enrichIgPosts(text, onProgress, opts = {}) {
   };
 
   let done = 0, total = 0;
+  // Snapshot throttling - on 5000-row datasets, serializing the full CSV every row
+  // crashes V8's heap. Only allocate the snapshot at most once every 5 seconds.
+  let lastSnap = 0;
+  const SNAP_EVERY = 5000;
+  const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.length <= igIdx) continue;
@@ -108,7 +113,7 @@ export async function enrichIgPosts(text, onProgress, opts = {}) {
       thumbs.slice(0, 6).forEach((src, k) => { r[idx['IG_Img_' + (k + 1)]] = src; });
       n = thumbs.length; if (n) done++;
     } catch {}
-    if (onProgress) await onProgress(name, n, toCSV(rows));
+    if (onProgress) await onProgress(name, n, maybeSnap());
     await shouldPause();
     await sleep(6000 + Math.floor(Math.random() * 3000));
   }

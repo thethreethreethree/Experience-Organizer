@@ -167,6 +167,11 @@ export async function enrichInstagram(text, onProgress, opts = {}) {
   if (igIdx < 0 || titleIdx < 0) throw new Error('CSV needs "Instagram" and "Title" columns');
   browser = null; page = null;
   let filled = 0, already = 0, total = 0;
+  // Snapshot throttling - serializing the whole CSV each row crashes V8 on 5000-row
+  // datasets. We only allocate the full snapshot at most once every 5 seconds.
+  let lastSnap = 0;
+  const SNAP_EVERY = 5000;
+  const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.length <= igIdx) continue;
@@ -189,7 +194,7 @@ export async function enrichInstagram(text, onProgress, opts = {}) {
     if (!h) { all.push(...await viaGoogle(name)); tryAccept(); }
 
     if (h) { r[igIdx] = igUrl(h); filled++; }
-    if (onProgress) await onProgress(name, h, [...new Set(all)], toCSV(rows));
+    if (onProgress) await onProgress(name, h, [...new Set(all)], maybeSnap());
     // Block here if the server has been paused (server.mjs sets the flag).
     await shouldPause();
     await sleep(3500 + Math.floor(Math.random() * 2000));

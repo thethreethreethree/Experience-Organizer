@@ -18,7 +18,8 @@ echo Starting Experience Organizer...
 REM Open the browser ~2s later so the server is ready first (avoids connection-refused).
 start "" /b cmd /c "ping -n 3 127.0.0.1 >nul & start http://localhost:8000"
 
-node server.mjs
+REM Bump V8 heap to 8 GB so scrapes on 5000+ row datasets have plenty of headroom.
+node --max-old-space-size=8192 server.mjs
 
 echo.
 echo Server stopped. Press any key to close.
