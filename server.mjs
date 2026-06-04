@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { enrichCsv } from './scrape-photos.mjs';
 import { enrichInstagram } from './scrape-instagram.mjs';
 import { enrichIgPosts } from './scrape-igposts.mjs';
+import { enrichHashtag, parseTags } from './scrape-hashtag.mjs';
 
 const ROOT = new URL('./', import.meta.url);
 const PORT = 8000;
@@ -189,6 +190,57 @@ const server = createServer(async (req, res) => {
           });
         } catch (e) {
           console.error('Stream error:', e.message);
+          send({ type: 'error', message: e.message });
+        } finally {
+          res.end();
+        }
+      });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/scrape-hashtag-stream') {
+      // Hashtag traveler-feed collection. Body is JSON: { tags, count, region }.
+      // Streams NDJSON events so the UI can render live discovery + per-post progress.
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', async () => {
+        res.writeHead(200, {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          'Access-Control-Allow-Origin': '*',
+        });
+        const send = (ev) => { try { res.write(JSON.stringify(ev) + '\n'); } catch {} };
+        try {
+          let payload = {};
+          try { payload = JSON.parse(body || '{}'); } catch {}
+          const tags = parseTags(payload.tags || '');
+          const count = Math.max(1, Math.min(500, parseInt(payload.count, 10) || 100));
+          const region = (payload.region || '').trim();
+          if (!tags.length) { send({ type: 'error', message: 'At least one hashtag is required.' }); res.end(); return; }
+          send({ type: 'start', tags, count, region });
+          console.log(`Hashtag stream: #${tags.join(', #')} (target ${count}${region ? `, region "${region}"` : ''})`);
+
+          // Reset snapshot so /dump-current reflects this run, not the previous CSV.
+          LATEST_CSV_SNAPSHOT = '';
+
+          const result = await enrichHashtag(tags, count, region, async (ev) => {
+            if (ev.phase === 'discover') {
+              send({ type: 'discover', tag: ev.tag, found: ev.found });
+            } else if (ev.phase === 'fetch') {
+              send({ type: 'post', i: ev.i, total: ev.total, name: ev.name, ok: ev.ok, kept: ev.kept, want: ev.want });
+              // Update the in-memory snapshot so /dump-current can serve live progress, but
+              // intentionally skip partialSave — the disk partial is shared with the other
+              // tools' restore panel, which expects the (Title, Image, ...) row schema.
+              if (ev.csvSoFar) LATEST_CSV_SNAPSHOT = ev.csvSoFar;
+            }
+            if (await shouldPause()) send({ type: 'resumed', from: 'hashtag' });
+          }, { shouldPause });
+
+          LATEST_CSV_SNAPSHOT = result.csv;
+          send({ type: 'done', csv: result.csv, kept: result.kept, attempted: result.attempted, target: result.target });
+        } catch (e) {
+          console.error('Hashtag stream error:', e.message);
           send({ type: 'error', message: e.message });
         } finally {
           res.end();
