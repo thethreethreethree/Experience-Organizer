@@ -92,7 +92,7 @@
   #travelfeed .tfhead{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:18px}
   #travelfeed .tfhead h1{margin:6px 0 4px;font-size:22px}
   #travelfeed .tfhead .sub{color:var(--muted);font-size:13px;margin:0}
-  #travelfeed .tfform{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;display:grid;grid-template-columns:2fr 1fr 2fr;gap:14px;margin-bottom:14px}
+  #travelfeed .tfform{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;display:grid;grid-template-columns:2fr 1fr 1fr 2fr;gap:14px;margin-bottom:14px}
   #travelfeed .tfform .field label{display:block;font-size:11px;letter-spacing:.5px;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
   #travelfeed .tfform input{width:100%;background:#0c0e12;color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:13px}
   #travelfeed .tfform input:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(255,184,77,.18)}
@@ -192,6 +192,11 @@
       <label for="tfCount">Posts to collect</label>
       <input id="tfCount" type="number" min="1" max="500" value="100" />
       <div class="hint">Target. Each post takes ~6-8s.</div>
+    </div>
+    <div class="field">
+      <label for="tfMinLikes">Min likes (quality)</label>
+      <input id="tfMinLikes" type="number" min="0" max="10000000" step="100" value="1000" />
+      <div class="hint">Skip posts below this. Set <code>0</code> to disable.</div>
     </div>
     <div class="field">
       <label for="tfRegion">Region label</label>
@@ -995,7 +1000,7 @@ document.getElementById('askBtn').addEventListener('click',askClaude);
 // Standalone section (#travelfeed) with its own state - never reads or writes the
 // main app's DATA/VIEW globals, so it can't leak rows into the other tools.
 // ============================================================
-const TF_HEADERS = ['handle','caption','image_url','location_label','ig_post_url','likes_label','verified'];
+const TF_HEADERS = ['handle','caption','image_url','video_url','location_label','ig_post_url','likes_label','verified'];
 let TF_ROWS = [];          // collected post objects ({handle, caption, ...})
 let TF_SEEN = new Set();   // ig_post_url's already in TF_ROWS - dedup across import + scrape
 let TF_FILENAME = '';      // remembered Import filename, used to suggest the Export name
@@ -1047,6 +1052,8 @@ function tfRenderStats(){
   if (!TF_ROWS.length) { el.innerHTML=''; return; }
   const verified = TF_ROWS.filter(r => String(r.verified).toLowerCase()==='true').length;
   const withLoc = TF_ROWS.filter(r => r.location_label).length;
+  const reels = TF_ROWS.filter(r => r.video_url).length;
+  const photos = TF_ROWS.length - reels;
   const uniqueAuthors = new Set(TF_ROWS.map(r => r.handle).filter(Boolean)).size;
   const missingHandle = TF_ROWS.filter(r => !r.handle).length;
   const warn = missingHandle
@@ -1054,6 +1061,8 @@ function tfRenderStats(){
     : '';
   el.innerHTML =
     `<div class="stat"><div class="n">${TF_ROWS.length}</div><div class="l">Posts collected</div></div>`+
+    `<div class="stat"><div class="n">${photos}</div><div class="l">Photos</div></div>`+
+    `<div class="stat"><div class="n" style="color:#7b2cbf">${reels}</div><div class="l">Reels</div></div>`+
     `<div class="stat"><div class="n">${uniqueAuthors}</div><div class="l">Unique creators</div></div>`+
     `<div class="stat" style="--c:#06aed5"><div class="n" style="color:#06aed5">${verified}</div><div class="l">Verified</div></div>`+
     `<div class="stat"><div class="n">${withLoc}</div><div class="l">With location</div></div>`+
@@ -1066,8 +1075,12 @@ function tfRenderGrid(){
   const view = TF_ROWS.slice().reverse();
   grid.innerHTML = view.map(r=>{
     const v = String(r.verified).toLowerCase()==='true';
+    const isVideo = !!r.video_url;
     const img = r.image_url
       ? `<img src="${escapeHTML(r.image_url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'" alt="">`
+      : '';
+    const videoBadge = isVideo
+      ? '<span class="vbadge" style="left:auto;right:8px;background:#7b2cbf;color:#fff">▶ Reel</span>'
       : '';
     const handle = escapeHTML(r.handle);
     const cap = escapeHTML(r.caption||'');
@@ -1079,7 +1092,7 @@ function tfRenderGrid(){
       ? `<a href="https://www.instagram.com/${handle}/" target="_blank" rel="noopener noreferrer">@${handle}</a>`
       : `<a href="${escapeHTML(r.ig_post_url)}" target="_blank" rel="noopener noreferrer" style="color:#ffb84d">(no handle — open post)</a>`;
     return `<div class="feedcard">
-      <div class="ph">${img}${v?'<span class="vbadge">✓ Verified</span>':''}</div>
+      <div class="ph">${img}${v?'<span class="vbadge">✓ Verified</span>':''}${videoBadge}</div>
       <div class="body">
         <div class="who">${who}</div>
         ${cap?`<div class="cap">${cap}</div>`:''}
@@ -1133,6 +1146,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
   if (TF_RUNNING) return;
   const tags = document.getElementById('tfTags').value.trim();
   const count = parseInt(document.getElementById('tfCount').value, 10) || 100;
+  const minLikes = Math.max(0, parseInt(document.getElementById('tfMinLikes').value, 10) || 0);
   const region = document.getElementById('tfRegion').value.trim();
   const status = document.getElementById('tfStatus');
   if (!tags) { status.textContent = 'Add at least one hashtag (e.g. ELNIDO).'; return; }
@@ -1148,7 +1162,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
     const res = await fetch('/scrape-hashtag-stream', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ tags, count, region }),
+      body: JSON.stringify({ tags, count, minLikes, region }),
     });
     if (!res.ok) throw new Error(await res.text());
     const reader = res.body.getReader(), dec = new TextDecoder();
@@ -1162,14 +1176,18 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
         if (!line) continue;
         let ev; try { ev = JSON.parse(line); } catch { continue; }
         if (ev.type === 'start'){
-          tfProgPhase(`Discovering posts across ${ev.tags.length} hashtag(s) (target ${ev.count})…`);
+          const minNote = ev.minLikes ? `, min ${ev.minLikes.toLocaleString()} likes` : '';
+          tfProgPhase(`Discovering posts across ${ev.tags.length} hashtag(s) (target ${ev.count}${minNote})…`);
         } else if (ev.type === 'discover'){
           tfProgPhase(`Discovering #${ev.tag} — ${ev.found} found`);
           status.textContent = `Scrolling #${ev.tag} grid… ${ev.found} post(s) queued.`;
         } else if (ev.type === 'post'){
           tfProgDeterminate(ev.i, ev.total);
-          tfProgPhase(`Post ${ev.i} / ${ev.total} — kept ${ev.kept} / ${ev.want}`);
-          status.textContent = `${ev.ok?'✓':'·'} ${ev.name}  (kept ${ev.kept} / ${ev.want})`;
+          const rej = ev.rejected ? `, ${ev.rejected} below min` : '';
+          tfProgPhase(`Post ${ev.i} / ${ev.total} — kept ${ev.kept} / ${ev.want}${rej}`);
+          const marker = ev.ok ? '✓' : (ev.reason ? '⊘' : '·');
+          const tail = ev.reason ? ` — ${ev.reason}` : '';
+          status.textContent = `${marker} ${ev.name}${tail}  (kept ${ev.kept} / ${ev.want})`;
           // Live snapshot poll: every 2nd post, refresh from /dump-current so the grid
           // updates without waiting for the final response. Cheap because the snapshot
           // is in-memory on the server.
@@ -1199,7 +1217,8 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
             for (const row of finalRows) tfAddRow(row);
             tfRenderGrid(); tfRenderStats();
           }
-          status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}). Total in CSV: ${TF_ROWS.length}.`;
+          const rejNote = ev.rejectedLowLikes ? ` Skipped ${ev.rejectedLowLikes} below min-likes threshold.` : '';
+          status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}).${rejNote} Total in CSV: ${TF_ROWS.length}.`;
         } else if (ev.type === 'error'){
           throw new Error(ev.message || 'stream error');
         }

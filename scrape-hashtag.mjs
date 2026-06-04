@@ -20,12 +20,24 @@ const CHROME = [
 const userDataDir = fileURLToPath(new URL('./.ig-session', import.meta.url));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const HEADERS = ['handle', 'caption', 'image_url', 'location_label', 'ig_post_url', 'likes_label', 'verified'];
+const HEADERS = ['handle', 'caption', 'image_url', 'video_url', 'location_label', 'ig_post_url', 'likes_label', 'verified'];
 const csvField = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
 const toCSV = rows => [HEADERS.join(','), ...rows.map(r => HEADERS.map(h => csvField(r[h])).join(','))].join('\n');
 
 // Strip the leading '#' and lowercase. IG tag URLs are case-insensitive but canonical lowercase.
 const normTag = t => (t || '').trim().replace(/^#/, '').toLowerCase();
+
+// Convert IG's display-style likes label to a number. Handles "2,443", "29K", "1.2M", "1.5B".
+// Returns 0 for empty/unparseable - which, when a minLikes threshold is active, rejects the row.
+export function parseLikes(label) {
+  if (!label) return 0;
+  const m = String(label).trim().match(/^([\d.,]+)\s*([KMB])?$/i);
+  if (!m) return 0;
+  const n = parseFloat(m[1].replace(/,/g, ''));
+  if (!isFinite(n)) return 0;
+  const mult = { K: 1e3, M: 1e6, B: 1e9 }[(m[2] || '').toUpperCase()] || 1;
+  return Math.round(n * mult);
+}
 
 // Parse a comma/space/newline-separated list of tags into a clean array, deduped.
 export function parseTags(input) {
@@ -89,6 +101,10 @@ async function fetchPost(page, href, regionLabel) {
       const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
       const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
       const ogDesc  = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
+      const ogVideo = document.querySelector('meta[property="og:video"]')?.getAttribute('content')
+                   || document.querySelector('meta[property="og:video:secure_url"]')?.getAttribute('content')
+                   || document.querySelector('meta[property="og:video:url"]')?.getAttribute('content')
+                   || '';
 
       // Handle: og:description's "- <handle> on <date>" pattern. IG ships this for every
       // public post. Allow digits/underscore/period but reject the "on" sentinel itself.
@@ -113,8 +129,15 @@ async function fetchPost(page, href, regionLabel) {
         if (mD) caption = mD[1].trim();
       }
 
-      // Image: og:image (always present on valid posts).
+      // Image: og:image (always present on valid posts, including Reels - it's the cover frame).
       const image_url = ogImage;
+      // Video: og:video for Reels/clips. Falls back to a <video> element source in the article
+      // when IG ships the page without og:video (rare). Image posts leave this empty.
+      let video_url = ogVideo;
+      if (!video_url) {
+        const v = document.querySelector('article video, main video');
+        if (v) video_url = v.currentSrc || v.src || '';
+      }
 
       // Likes: first number-with-suffix in og:desc (it leads with "<N> likes, <M> comments").
       let likes_label = '';
@@ -139,26 +162,28 @@ async function fetchPost(page, href, regionLabel) {
       }
 
       return {
-        handle, caption, image_url, location_label, verified, likes_label,
+        handle, caption, image_url, video_url, location_label, verified, likes_label,
         _hasOgImage: !!ogImage,
         _hasOgDesc: !!ogDesc,
+        _hasOgVideo: !!ogVideo,
         _handleSource: handleSource,
       };
     });
 
     // Per-post diagnostic. Surfaces in the server console so we can see exactly which
     // signal each post yielded - critical for debugging when extraction starts missing.
-    console.log(`  post ${href}: handle=${data.handle || '(none)'} (from ${data._handleSource || '-'}) img=${data.image_url ? 'yes' : 'no'} cap=${(data.caption || '').length}ch likes=${data.likes_label || '-'} loc=${data.location_label || '-'}`);
+    console.log(`  post ${href}: handle=${data.handle || '(none)'} (from ${data._handleSource || '-'}) img=${data.image_url ? 'yes' : 'no'} vid=${data.video_url ? 'yes' : 'no'} cap=${(data.caption || '').length}ch likes=${data.likes_label || '-'} loc=${data.location_label || '-'}`);
 
     // Accept the row if we have AT LEAST a handle or an image. A row missing both is
     // unusable; one with just an image is still useful (we'll tag the handle as unknown
     // and the user can clean it up). This used to silently drop everything missing handle.
-    if (!data.handle && !data.image_url) return null;
+    if (!data.handle && !data.image_url && !data.video_url) return null;
     const caption = (data.caption || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     return {
       handle: data.handle || '',
       caption,
       image_url: data.image_url || '',
+      video_url: data.video_url || '',
       location_label: data.location_label || regionLabel || '',
       ig_post_url: url,
       likes_label: data.likes_label || '',
@@ -176,8 +201,11 @@ async function fetchPost(page, href, regionLabel) {
 //   {phase:'discover', tag, found}
 //   {phase:'fetch', i, total, name, ok, csvSoFar}
 // opts.shouldPause: async () => boolean — blocks between posts when paused.
+// opts.minLikes: when > 0, only KEEP posts whose parsed likes meet/exceed this threshold.
+//   We over-scan discovery and cap total fetch attempts so a low-engagement hashtag can't loop forever.
 export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = {}) {
   const shouldPause = opts.shouldPause || (async () => false);
+  const minLikes = Math.max(0, parseInt(opts.minLikes, 10) || 0);
   if (!CHROME) throw new Error('No Chrome/Edge found.');
   if (!existsSync(userDataDir)) throw new Error('Not logged in to Instagram. Click "Log in to Instagram" on the home page first.');
   const tagList = Array.isArray(tags) ? tags : parseTags(tags);
@@ -200,10 +228,12 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
     throw new Error('Instagram session expired. Click "Log in to Instagram" again.');
   }
 
-  // Phase 1: discover post URLs across all tags. We over-collect (2x) so dedup + post-level
-  // failures still leave us with enough posts to reach `want`.
+  // Phase 1: discover post URLs across all tags. Overscan multiplier scales with the likes
+  // filter - a 1000-likes threshold typically rejects 60-80% of recent hashtag posts, so we
+  // need to queue 3-5x more URLs than the target to hit it.
   const target = Math.max(1, parseInt(want, 10) || 100);
-  const overscan = Math.min(target * 2, target + 60);
+  const overscanMult = minLikes >= 1000 ? 5 : minLikes > 0 ? 3 : 2;
+  const overscan = Math.min(target * overscanMult, target + 200);
   const allHrefs = new Set();
   for (const tag of tagList) {
     if (allHrefs.size >= overscan) break;
@@ -224,18 +254,31 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   const SNAP_EVERY = 5000;
   const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
 
+  let rejectedLowLikes = 0;
   for (let i = 0; i < hrefList.length && rows.length < target; i++) {
     const href = hrefList[i];
     const row = await fetchPost(page, href, regionLabel);
-    if (row) rows.push(row);
+    let kept = false;
+    let rejectReason = '';
+    if (row) {
+      if (minLikes > 0) {
+        const likes = parseLikes(row.likes_label);
+        if (likes >= minLikes) { rows.push(row); kept = true; }
+        else { rejectedLowLikes++; rejectReason = `<${minLikes} likes (${likes || 'unknown'})`; }
+      } else {
+        rows.push(row); kept = true;
+      }
+    }
     if (onProgress) await onProgress({
       phase: 'fetch',
       i: i + 1,
       total: hrefList.length,
       name: row?.handle ? '@' + row.handle : href,
-      ok: !!row,
+      ok: kept,
+      reason: rejectReason,
       kept: rows.length,
       want: target,
+      rejected: rejectedLowLikes,
       csvSoFar: maybeSnap(),
     });
     await shouldPause();
@@ -243,7 +286,7 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   }
 
   await browser.close();
-  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, target };
+  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, target };
 }
 
 // ---- CLI ----
