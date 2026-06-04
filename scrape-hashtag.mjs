@@ -63,68 +63,111 @@ async function collectShortcodes(page, tag, want, onTick) {
 }
 
 // Visit a single post URL and pull the 7 template fields. Returns null on failure.
+// On a post permalink, IG is a heavy SPA: at domcontentloaded the article chrome
+// (author link, caption, likes) hasn't rendered yet. We wait for the <article> to
+// appear, then read each field from MULTIPLE independent signals - the static head
+// metadata (og:title, og:image, JSON-LD) and the hydrated DOM - and accept the first
+// one that yields a value.
 async function fetchPost(page, href, regionLabel) {
   const url = `https://www.instagram.com${href}`;
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    await sleep(1600);
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    // Wait for the article skeleton; some posts (deleted / private) never render one,
+    // but we still want to read og:* from the head so we don't lose the row entirely.
+    await page.waitForSelector('article, main', { timeout: 12000 }).catch(() => {});
+    await sleep(2200);
+
     const data = await page.evaluate(() => {
-      // Header link with the author's handle. Instagram puts it in the role=link/anchor
-      // that wraps the avatar + username near the top of the post dialog.
+      // Evidence-based extraction (verified against IG's actual HTML via diag-flow.mjs):
+      //   og:title       = "<Display Name> on Instagram: \"<caption>\""     (caption lives here)
+      //   og:description = "<N> likes, <M> comments - <handle> on <date>: ..."  (handle + likes live here)
+      //   og:image       = CDN URL
+      //   <article>      = renders post body text including handle and (when present) the
+      //                    location label as the line immediately before "Follow"
+      //   <script ld+json> = NOT shipped for posts (always 0)
+      //   <article> anchors = always 0 in headless - dead-end strategy
+      const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
+      const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
+      const ogDesc  = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
+
+      // Handle: og:description's "- <handle> on <date>" pattern. IG ships this for every
+      // public post. Allow digits/underscore/period but reject the "on" sentinel itself.
       let handle = '';
-      for (const a of document.querySelectorAll('header a, article header a')) {
-        const m = (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_.]+)\/?$/);
-        if (m && m[1] && !['p', 'reel', 'explore', 'accounts'].includes(m[1])) { handle = m[1]; break; }
+      let handleSource = '';
+      let mDesc = ogDesc.match(/(?:likes|comments|views|plays)\s*-\s*([A-Za-z0-9_.]+)\s+on\s+/i);
+      if (mDesc) { handle = mDesc[1]; handleSource = 'og:desc'; }
+      // Fallback: some private/restricted posts use a slightly different og:desc form.
+      // Look for any "@handle" mention before "on Instagram" in og:title (rare).
+      if (!handle) {
+        const m = ogTitle.match(/\(@([A-Za-z0-9_.]+)\)/);
+        if (m) { handle = m[1]; handleSource = 'og:title-paren'; }
       }
-      // Verified badge sits inside the username header. We accept any svg/title containing "Verified".
-      const verifiedNode = document.querySelector('header svg[aria-label="Verified"], header svg title');
-      const verified = !!(document.querySelector('header svg[aria-label="Verified"]') ||
-        [...document.querySelectorAll('header svg title')].some(t => /verified/i.test(t.textContent || '')));
-      // Caption: the article's first <h1> or first dialog <h1> is the caption text in the
-      // post permalink view. Fall back to the og:description meta which Instagram still ships.
+
+      // Caption: og:title after "on Instagram:" (quotes optional, may be straight or curly).
       let caption = '';
-      const h1 = document.querySelector('article h1') || document.querySelector('main h1');
-      if (h1) caption = h1.innerText.trim();
-      if (!caption) {
-        const og = document.querySelector('meta[property="og:description"]');
-        if (og) caption = (og.getAttribute('content') || '').replace(/^.*?: \"?/, '').replace(/\"$/, '').trim();
+      const mCap = ogTitle.match(/on Instagram[^:]*:\s*["“]?([\s\S]+?)["”]?\s*$/i);
+      if (mCap) caption = mCap[1].trim();
+      else if (ogDesc) {
+        // og:desc fallback: text after the final ": "
+        const mD = ogDesc.match(/:\s*([\s\S]+?)\s*$/);
+        if (mD) caption = mD[1].trim();
       }
-      // Main image: prefer the og:image meta (highest-quality CDN URL); fall back to the
-      // largest <img> currently in the article.
-      let image_url = '';
-      const ogimg = document.querySelector('meta[property="og:image"]');
-      if (ogimg) image_url = ogimg.getAttribute('content') || '';
-      if (!image_url) {
-        const imgs = [...document.querySelectorAll('article img, main img')].filter(i => i.width >= 300);
-        if (imgs.length) image_url = imgs[0].currentSrc || imgs[0].src || '';
-      }
-      // Location: an anchor pointing at /explore/locations/<id> shown above the caption when present.
-      let location_label = '';
-      const locA = document.querySelector('a[href*="/explore/locations/"]');
-      if (locA) location_label = (locA.innerText || locA.textContent || '').trim();
-      // Likes: IG shows "1,234 likes" or "Liked by ... and 1,234 others". Pull the first
-      // number-with-commas we find in the article footer block.
+
+      // Image: og:image (always present on valid posts).
+      const image_url = ogImage;
+
+      // Likes: first number-with-suffix in og:desc (it leads with "<N> likes, <M> comments").
       let likes_label = '';
-      const txt = (document.querySelector('article')?.innerText) || document.body.innerText || '';
-      const m = txt.match(/([\d.,KMB]+)\s+(?:likes|views|plays)/i);
-      if (m) likes_label = m[1];
-      return { handle, caption, image_url, location_label, verified };
+      const mLikes = ogDesc.match(/^([\d,.KMB]+)\s+likes/i);
+      if (mLikes) likes_label = mLikes[1];
+
+      // Verified badge: <svg aria-label="Verified"> anywhere in the article header.
+      const verified = !!document.querySelector('article svg[aria-label="Verified"], header svg[aria-label="Verified"]');
+
+      // Location: in article body text, IG renders <handle>\n<location>\nFollow when a place
+      // is tagged. Find the line that comes RIGHT BEFORE "Follow" but isn't the handle itself.
+      let location_label = '';
+      if (handle) {
+        const articleText = document.querySelector('article')?.innerText || '';
+        const lines = articleText.split('\n').map(s => s.trim()).filter(Boolean);
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i] === 'Follow' && lines[i - 1] !== handle) {
+            // The line BEFORE "Follow" is location only if the line BEFORE THAT is the handle.
+            if (i >= 2 && lines[i - 2] === handle) { location_label = lines[i - 1]; break; }
+          }
+        }
+      }
+
+      return {
+        handle, caption, image_url, location_label, verified, likes_label,
+        _hasOgImage: !!ogImage,
+        _hasOgDesc: !!ogDesc,
+        _handleSource: handleSource,
+      };
     });
-    if (!data.handle) return null;
-    // Compress caption to a single line so the CSV stays one-row-per-post.
+
+    // Per-post diagnostic. Surfaces in the server console so we can see exactly which
+    // signal each post yielded - critical for debugging when extraction starts missing.
+    console.log(`  post ${href}: handle=${data.handle || '(none)'} (from ${data._handleSource || '-'}) img=${data.image_url ? 'yes' : 'no'} cap=${(data.caption || '').length}ch likes=${data.likes_label || '-'} loc=${data.location_label || '-'}`);
+
+    // Accept the row if we have AT LEAST a handle or an image. A row missing both is
+    // unusable; one with just an image is still useful (we'll tag the handle as unknown
+    // and the user can clean it up). This used to silently drop everything missing handle.
+    if (!data.handle && !data.image_url) return null;
     const caption = (data.caption || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     return {
-      handle: data.handle,
+      handle: data.handle || '',
       caption,
       image_url: data.image_url || '',
-      // Prefer the IG-reported location when we have one; otherwise stamp the region label
-      // the user provided so the CSV is never blank in that column.
       location_label: data.location_label || regionLabel || '',
       ig_post_url: url,
       likes_label: data.likes_label || '',
       verified: data.verified ? 'true' : 'false',
     };
-  } catch { return null; }
+  } catch (e) {
+    console.log(`  post ${href}: error ${e.message}`);
+    return null;
+  }
 }
 
 // Main entry. tags: array of bare hashtag names; want: target post count; regionLabel: stamped
