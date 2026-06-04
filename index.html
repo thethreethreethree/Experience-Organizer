@@ -1023,12 +1023,15 @@ document.getElementById('tfBack').addEventListener('click',()=>{
 function tfParseCSV(text){
   const rows = parseCSV(text);
   // parseCSV returns objects keyed by the input headers. Project onto TF_HEADERS so
-  // missing columns become empty strings rather than `undefined`.
+  // missing columns become empty strings rather than `undefined`. We DO NOT silently
+  // drop rows with missing handle - if the scraper extracted an image and a URL but
+  // failed to get a handle, the user needs to see the row (showing "(no handle)") so
+  // they know extraction has a bug rather than thinking the run produced nothing.
   return rows.map(r => {
     const o = {};
     TF_HEADERS.forEach(h => { o[h] = (r[h] != null ? r[h] : ''); });
     return o;
-  }).filter(r => r.handle && r.ig_post_url);
+  }).filter(r => r.ig_post_url);
 }
 
 function tfAddRow(row){
@@ -1044,12 +1047,17 @@ function tfRenderStats(){
   if (!TF_ROWS.length) { el.innerHTML=''; return; }
   const verified = TF_ROWS.filter(r => String(r.verified).toLowerCase()==='true').length;
   const withLoc = TF_ROWS.filter(r => r.location_label).length;
-  const uniqueAuthors = new Set(TF_ROWS.map(r => r.handle)).size;
+  const uniqueAuthors = new Set(TF_ROWS.map(r => r.handle).filter(Boolean)).size;
+  const missingHandle = TF_ROWS.filter(r => !r.handle).length;
+  const warn = missingHandle
+    ? `<div class="stat" style="border-color:#ffb84d55"><div class="n" style="color:#ffb84d">${missingHandle}</div><div class="l">⚠ Missing handle</div></div>`
+    : '';
   el.innerHTML =
     `<div class="stat"><div class="n">${TF_ROWS.length}</div><div class="l">Posts collected</div></div>`+
     `<div class="stat"><div class="n">${uniqueAuthors}</div><div class="l">Unique creators</div></div>`+
     `<div class="stat" style="--c:#06aed5"><div class="n" style="color:#06aed5">${verified}</div><div class="l">Verified</div></div>`+
-    `<div class="stat"><div class="n">${withLoc}</div><div class="l">With location</div></div>`;
+    `<div class="stat"><div class="n">${withLoc}</div><div class="l">With location</div></div>`+
+    warn;
 }
 function tfRenderGrid(){
   const grid = document.getElementById('tfGrid');
@@ -1065,10 +1073,15 @@ function tfRenderGrid(){
     const cap = escapeHTML(r.caption||'');
     const loc = r.location_label ? `<span>📍 ${escapeHTML(r.location_label)}</span>` : '';
     const likes = r.likes_label ? `<span><b>${escapeHTML(r.likes_label)}</b> ❤</span>` : '';
+    // Show the post link as the primary tap target when handle is missing - so a row with
+    // a broken extraction is still useful (the user can open it manually and see the author).
+    const who = handle
+      ? `<a href="https://www.instagram.com/${handle}/" target="_blank" rel="noopener noreferrer">@${handle}</a>`
+      : `<a href="${escapeHTML(r.ig_post_url)}" target="_blank" rel="noopener noreferrer" style="color:#ffb84d">(no handle — open post)</a>`;
     return `<div class="feedcard">
       <div class="ph">${img}${v?'<span class="vbadge">✓ Verified</span>':''}</div>
       <div class="body">
-        <div class="who"><a href="https://www.instagram.com/${handle}/" target="_blank" rel="noopener noreferrer">@${handle}</a></div>
+        <div class="who">${who}</div>
         ${cap?`<div class="cap">${cap}</div>`:''}
         <div class="meta">
           ${likes} ${loc}
