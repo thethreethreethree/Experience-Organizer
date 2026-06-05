@@ -22,7 +22,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const HEADERS = ['handle', 'caption', 'image_url', 'video_url', 'location_label', 'ig_post_url', 'likes_label', 'verified'];
 const csvField = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
-const toCSV = rows => [HEADERS.join(','), ...rows.map(r => HEADERS.map(h => csvField(r[h])).join(','))].join('\n');
+// Trailing newline per Wondavu contract ("One blank line at the end of the file").
+const toCSV = rows => [HEADERS.join(','), ...rows.map(r => HEADERS.map(h => csvField(r[h])).join(','))].join('\n') + '\n';
 
 // Strip the leading '#' and lowercase. IG tag URLs are case-insensitive but canonical lowercase.
 const normTag = t => (t || '').trim().replace(/^#/, '').toLowerCase();
@@ -178,15 +179,21 @@ async function fetchPost(page, href, regionLabel) {
     // unusable; one with just an image is still useful (we'll tag the handle as unknown
     // and the user can clean it up). This used to silently drop everything missing handle.
     if (!data.handle && !data.image_url && !data.video_url) return null;
-    const caption = (data.caption || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    const location_label = data.location_label || regionLabel || '';
+    // Caption is REQUIRED by the Wondavu contract. When IG strips og:title (rare), fall back
+    // to the location label so the importer never receives an empty caption.
+    let caption = (data.caption || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    if (!caption) caption = location_label;
     return {
       handle: data.handle || '',
       caption,
       image_url: data.image_url || '',
       video_url: data.video_url || '',
-      location_label: data.location_label || regionLabel || '',
+      location_label,
       ig_post_url: url,
-      likes_label: data.likes_label || '',
+      // Contract: defaults to "0" if empty. Stamping here keeps the importer's logic simpler
+      // and avoids any ambiguity about who provides the default.
+      likes_label: data.likes_label || '0',
       verified: data.verified ? 'true' : 'false',
     };
   } catch (e) {

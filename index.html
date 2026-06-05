@@ -1274,21 +1274,57 @@ document.getElementById('tfImportInput').addEventListener('change', e=>{
   e.target.value = ''; // allow re-importing the same file later
 });
 
-// --- Export CSV ---
+// --- Export CSV (Wondavu contract: drops rows missing required fields, downloads
+// a sibling errors.txt listing what was dropped + why so the user knows) ---
+function tfValidateForExport(rows){
+  // REJECT_SCHEME: blob:, data:, file:, ftp: schemes are not server-fetchable per contract.
+  const REJECT_SCHEME = /^(blob:|data:|file:|ftp:)/i;
+  const ok = [], errors = [];
+  rows.forEach((r, i) => {
+    const idx = i + 1;
+    if (!r.handle) { errors.push(`input #${idx}: handle missing — dropped`); return; }
+    if (!r.caption) { errors.push(`input #${idx} (@${r.handle}): caption missing — dropped (no caption and no location_label to fall back to)`); return; }
+    if (!r.image_url) { errors.push(`input #${idx} (@${r.handle}): image_url missing — dropped (poster image required)`); return; }
+    if (REJECT_SCHEME.test(r.image_url)) { errors.push(`input #${idx} (@${r.handle}): image_url was ${r.image_url.slice(0, 40)}… — dropped (poster image not server-fetchable)`); return; }
+    // video_url: contract says coerce blob/data to empty (still imports as image-only),
+    // and if it accidentally received an instagram.com/p/ URL, move it to ig_post_url.
+    const out = { ...r };
+    if (REJECT_SCHEME.test(out.video_url || '')) out.video_url = '';
+    if (/^https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel)\//.test(out.video_url || '')) {
+      if (!out.ig_post_url) out.ig_post_url = out.video_url;
+      out.video_url = '';
+    }
+    ok.push(out);
+  });
+  return { ok, errors };
+}
 document.getElementById('tfExport').addEventListener('click', ()=>{
   if (!TF_ROWS.length) return;
-  const lines = [TF_HEADERS.join(',')];
-  TF_ROWS.forEach(r => lines.push(TF_HEADERS.map(h => csvEscape(r[h])).join(',')));
-  const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  // Filename: prefer the imported filename, else region label, else date stamp.
+  const { ok, errors } = tfValidateForExport(TF_ROWS);
+  // Filename: prefer the imported filename, else region label, else "travel_feed".
   const base = TF_FILENAME
     ? TF_FILENAME.replace(/\.csv$/i,'') + '_updated'
     : (TF_LAST_REGION || document.getElementById('tfRegion').value || 'travel_feed')
         .replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'').toLowerCase();
-  a.href = url; a.download = base + '.csv'; a.click();
-  URL.revokeObjectURL(url);
+  // CSV: header + valid rows + trailing newline (contract: "One blank line at the end").
+  const lines = [TF_HEADERS.join(',')];
+  ok.forEach(r => lines.push(TF_HEADERS.map(h => csvEscape(r[h] != null ? r[h] : '')).join(',')));
+  const csvBlob = new Blob([lines.join('\n') + '\n'], {type:'text/csv;charset=utf-8'});
+  const csvUrl = URL.createObjectURL(csvBlob);
+  const a = document.createElement('a');
+  a.href = csvUrl; a.download = base + '.csv'; a.click();
+  URL.revokeObjectURL(csvUrl);
+  // errors.txt: only if anything was dropped. Mirrors the contract's failure-block format.
+  if (errors.length){
+    const errBlob = new Blob([errors.join('\n') + '\n'], {type:'text/plain;charset=utf-8'});
+    const errUrl = URL.createObjectURL(errBlob);
+    const b = document.createElement('a');
+    b.href = errUrl; b.download = base + '_errors.txt'; b.click();
+    URL.revokeObjectURL(errUrl);
+  }
+  document.getElementById('tfStatus').textContent =
+    `Exported ${ok.length}/${TF_ROWS.length} rows to ${base}.csv` +
+    (errors.length ? `. Dropped ${errors.length} — see ${base}_errors.txt` : '');
 });
 
 // Start on the landing page; a view loads only when the user picks one.
