@@ -92,7 +92,7 @@
   #travelfeed .tfhead{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:18px}
   #travelfeed .tfhead h1{margin:6px 0 4px;font-size:22px}
   #travelfeed .tfhead .sub{color:var(--muted);font-size:13px;margin:0}
-  #travelfeed .tfform{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;display:grid;grid-template-columns:2fr 1fr 1fr 2fr;gap:14px;margin-bottom:14px}
+  #travelfeed .tfform{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:14px}
   #travelfeed .tfform .field label{display:block;font-size:11px;letter-spacing:.5px;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
   #travelfeed .tfform input{width:100%;background:#0c0e12;color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:13px}
   #travelfeed .tfform input:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(255,184,77,.18)}
@@ -197,6 +197,14 @@
       <label for="tfMinLikes">Min likes (quality)</label>
       <input id="tfMinLikes" type="number" min="0" max="10000000" step="100" value="1000" />
       <div class="hint">Skip posts below this. Set <code>0</code> to disable.</div>
+    </div>
+    <div class="field" style="grid-column:span 1">
+      <label for="tfRequireVideo">Reels only</label>
+      <div style="display:flex;align-items:center;gap:8px;background:#0c0e12;border:1px solid var(--border);border-radius:8px;padding:9px 11px">
+        <input id="tfRequireVideo" type="checkbox" checked style="width:16px;height:16px;accent-color:#7b2cbf;cursor:pointer" />
+        <label for="tfRequireVideo" style="font-size:13px;color:var(--fg);cursor:pointer;margin:0">Skip image-only posts</label>
+      </div>
+      <div class="hint">Require a real <code>video_url</code> (MP4/WebM/MOV).</div>
     </div>
     <div class="field">
       <label for="tfRegion">Region label</label>
@@ -1147,6 +1155,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
   const tags = document.getElementById('tfTags').value.trim();
   const count = parseInt(document.getElementById('tfCount').value, 10) || 100;
   const minLikes = Math.max(0, parseInt(document.getElementById('tfMinLikes').value, 10) || 0);
+  const requireVideo = document.getElementById('tfRequireVideo').checked;
   const region = document.getElementById('tfRegion').value.trim();
   const status = document.getElementById('tfStatus');
   if (!tags) { status.textContent = 'Add at least one hashtag (e.g. ELNIDO).'; return; }
@@ -1162,7 +1171,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
     const res = await fetch('/scrape-hashtag-stream', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ tags, count, minLikes, region }),
+      body: JSON.stringify({ tags, count, minLikes, requireVideo, region }),
     });
     if (!res.ok) throw new Error(await res.text());
     const reader = res.body.getReader(), dec = new TextDecoder();
@@ -1177,14 +1186,16 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
         let ev; try { ev = JSON.parse(line); } catch { continue; }
         if (ev.type === 'start'){
           const minNote = ev.minLikes ? `, min ${ev.minLikes.toLocaleString()} likes` : '';
-          tfProgPhase(`Discovering posts across ${ev.tags.length} hashtag(s) (target ${ev.count}${minNote})…`);
+          const reelsNote = ev.requireVideo ? ', Reels only' : '';
+          tfProgPhase(`Discovering posts across ${ev.tags.length} hashtag(s) (target ${ev.count}${minNote}${reelsNote})…`);
         } else if (ev.type === 'discover'){
           tfProgPhase(`Discovering #${ev.tag} — ${ev.found} found`);
           status.textContent = `Scrolling #${ev.tag} grid… ${ev.found} post(s) queued.`;
         } else if (ev.type === 'post'){
           tfProgDeterminate(ev.i, ev.total);
-          const rej = ev.rejected ? `, ${ev.rejected} below min` : '';
-          tfProgPhase(`Post ${ev.i} / ${ev.total} — kept ${ev.kept} / ${ev.want}${rej}`);
+          const rej = ev.rejected ? `, ${ev.rejected} skipped` : '';
+          const rl = ev.rateLimitHits ? `, 429×${ev.rateLimitHits}` : '';
+          tfProgPhase(`Post ${ev.i} / ${ev.total} — kept ${ev.kept} / ${ev.want}${rej}${rl}`);
           const marker = ev.ok ? '✓' : (ev.reason ? '⊘' : '·');
           const tail = ev.reason ? ` — ${ev.reason}` : '';
           status.textContent = `${marker} ${ev.name}${tail}  (kept ${ev.kept} / ${ev.want})`;
@@ -1217,8 +1228,15 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
             for (const row of finalRows) tfAddRow(row);
             tfRenderGrid(); tfRenderStats();
           }
-          const rejNote = ev.rejectedLowLikes ? ` Skipped ${ev.rejectedLowLikes} below min-likes threshold.` : '';
-          status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}).${rejNote} Total in CSV: ${TF_ROWS.length}.`;
+          const parts = [];
+          if (ev.rejectedLowLikes) parts.push(`${ev.rejectedLowLikes} below min-likes`);
+          if (ev.rejectedNoVideo) parts.push(`${ev.rejectedNoVideo} image-only`);
+          const rejNote = parts.length ? ` Skipped ${parts.join(', ')}.` : '';
+          if (ev.rateLimitedAbort){
+            status.textContent = `⚠ Aborted: Instagram rate-limited your session (HTTP 429). Wait 1-24h, or use a different IG account, then retry. Collected ${ev.kept}/${ev.target} before throttle. Total in CSV: ${TF_ROWS.length}.`;
+          } else {
+            status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}).${rejNote} Total in CSV: ${TF_ROWS.length}.`;
+          }
         } else if (ev.type === 'error'){
           throw new Error(ev.message || 'stream error');
         }
@@ -1288,11 +1306,16 @@ function tfValidateForExport(rows){
     if (REJECT_SCHEME.test(r.image_url)) { errors.push(`input #${idx} (@${r.handle}): image_url was ${r.image_url.slice(0, 40)}… — dropped (poster image not server-fetchable)`); return; }
     // video_url: contract says coerce blob/data to empty (still imports as image-only),
     // and if it accidentally received an instagram.com/p/ URL, move it to ig_post_url.
+    // Also enforce the self-check: must be https AND (mp4/webm/mov OR IG's /o1/v/ video CDN path).
     const out = { ...r };
     if (REJECT_SCHEME.test(out.video_url || '')) out.video_url = '';
     if (/^https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel)\//.test(out.video_url || '')) {
       if (!out.ig_post_url) out.ig_post_url = out.video_url;
       out.video_url = '';
+    }
+    if (out.video_url){
+      const isVid = /^https?:\/\//.test(out.video_url) && (/\.(?:mp4|webm|mov)(?:\?|$)/i.test(out.video_url) || /scontent[.-][^/]*cdninstagram\.com\/(?:[^/]+\/)*o1\/v\//i.test(out.video_url));
+      if (!isVid) out.video_url = '';
     }
     ok.push(out);
   });

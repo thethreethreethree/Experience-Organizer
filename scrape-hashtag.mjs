@@ -75,16 +75,28 @@ async function collectShortcodes(page, tag, want, onTick) {
   return [...seen].slice(0, want);
 }
 
-// Visit a single post URL and pull the 7 template fields. Returns null on failure.
-// On a post permalink, IG is a heavy SPA: at domcontentloaded the article chrome
-// (author link, caption, likes) hasn't rendered yet. We wait for the <article> to
-// appear, then read each field from MULTIPLE independent signals - the static head
-// metadata (og:title, og:image, JSON-LD) and the hydrated DOM - and accept the first
-// one that yields a value.
+// Sentinel: when Instagram rate-limits us, the navigation lands on chrome-error://
+// with body text "HTTP ERROR 429". We surface it as a distinct return value so the
+// caller can abort the run instead of burning more attempts on a throttled session.
+const RATE_LIMITED = Symbol('rate-limited');
+
+// Visit a single post URL and pull the 7 template fields. Returns null on failure,
+// or RATE_LIMITED when IG returns HTTP 429. On a post permalink, IG is a heavy SPA:
+// at domcontentloaded the article chrome hasn't rendered yet. We wait for the
+// <article> to appear, then read each field from MULTIPLE independent signals - the
+// static head metadata (og:title, og:image, JSON-LD) and the hydrated DOM.
 async function fetchPost(page, href, regionLabel) {
   const url = `https://www.instagram.com${href}`;
   try {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    // Detect Chrome's HTTP 429 error page before wasting time on selectors.
+    const landed = page.url();
+    if (landed.startsWith('chrome-error://')) {
+      const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+      if (/HTTP ERROR 429|429/.test(bodyText)) { console.log(`  post ${href}: HTTP 429 (rate-limited)`); return RATE_LIMITED; }
+      console.log(`  post ${href}: chrome-error (${bodyText.slice(0, 60).replace(/\n/g, ' ')})`);
+      return null;
+    }
     // Wait for the article skeleton; some posts (deleted / private) never render one,
     // but we still want to read og:* from the head so we don't lose the row entirely.
     await page.waitForSelector('article, main', { timeout: 12000 }).catch(() => {});
@@ -210,9 +222,13 @@ async function fetchPost(page, href, regionLabel) {
 // opts.shouldPause: async () => boolean — blocks between posts when paused.
 // opts.minLikes: when > 0, only KEEP posts whose parsed likes meet/exceed this threshold.
 //   We over-scan discovery and cap total fetch attempts so a low-engagement hashtag can't loop forever.
+// opts.requireVideo: when true, only KEEP posts with a real video_url. Image-only posts are
+//   dropped at fetch time. Use this to produce a Reel-only feed where the importer can play
+//   each row inline.
 export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = {}) {
   const shouldPause = opts.shouldPause || (async () => false);
   const minLikes = Math.max(0, parseInt(opts.minLikes, 10) || 0);
+  const requireVideo = !!opts.requireVideo;
   if (!CHROME) throw new Error('No Chrome/Edge found.');
   if (!existsSync(userDataDir)) throw new Error('Not logged in to Instagram. Click "Log in to Instagram" on the home page first.');
   const tagList = Array.isArray(tags) ? tags : parseTags(tags);
@@ -239,8 +255,13 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   // filter - a 1000-likes threshold typically rejects 60-80% of recent hashtag posts, so we
   // need to queue 3-5x more URLs than the target to hit it.
   const target = Math.max(1, parseInt(want, 10) || 100);
-  const overscanMult = minLikes >= 1000 ? 5 : minLikes > 0 ? 3 : 2;
-  const overscan = Math.min(target * overscanMult, target + 200);
+  // Overscan multiplier: each filter narrows the qualifying set so we need more discovery to land
+  // the target. Rough empirical hits from #elnido: ~30% of posts have video, ~30% have ≥1000 likes,
+  // joint ~10%. Cap absolute count so a tiny hashtag doesn't spin forever.
+  let overscanMult = 2;
+  if (minLikes > 0) overscanMult *= minLikes >= 1000 ? 3 : 2;
+  if (requireVideo) overscanMult *= 3;
+  const overscan = Math.min(target * overscanMult, target + 400);
   const allHrefs = new Set();
   for (const tag of tagList) {
     if (allHrefs.size >= overscan) break;
@@ -261,14 +282,48 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   const SNAP_EVERY = 5000;
   const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
 
+  // Pattern matching the Wondavu contract's self-check for video_url: ends in .mp4/.webm/.mov
+  // OR contains IG's known video CDN path /o1/v/. Anything else gets rejected so we never claim
+  // an image URL as a video.
+  const isRealVideoUrl = (u) => !!u && /^https?:\/\//.test(u) && (/\.(?:mp4|webm|mov)(?:\?|$)/i.test(u) || /scontent[.-][^/]*cdninstagram\.com\/(?:[^/]+\/)*o1\/v\//i.test(u));
+
   let rejectedLowLikes = 0;
+  let rejectedNoVideo = 0;
+  let rateLimitHits = 0;
+  let rateLimitedAbort = false;
   for (let i = 0; i < hrefList.length && rows.length < target; i++) {
     const href = hrefList[i];
-    const row = await fetchPost(page, href, regionLabel);
+    const result = await fetchPost(page, href, regionLabel);
+    // Rate-limit detection: if IG returns HTTP 429 three times in a row, the session is
+    // throttled. Burning more attempts won't recover and just makes the throttle stick
+    // longer. Abort cleanly and tell the caller so the UI can show a helpful message.
+    if (result === RATE_LIMITED) {
+      rateLimitHits++;
+      if (onProgress) await onProgress({
+        phase: 'fetch', i: i + 1, total: hrefList.length, name: href,
+        ok: false, reason: 'rate-limited (HTTP 429)',
+        kept: rows.length, want: target,
+        rejected: rejectedLowLikes + rejectedNoVideo,
+        rejectedLowLikes, rejectedNoVideo, rateLimitHits,
+      });
+      if (rateLimitHits >= 3) {
+        rateLimitedAbort = true;
+        console.log(`Rate-limit confirmed after ${rateLimitHits} consecutive 429s — aborting.`);
+        break;
+      }
+      // Long backoff to give the throttle a chance to lift before the next probe.
+      await sleep(20000 + Math.floor(Math.random() * 10000));
+      continue;
+    }
+    rateLimitHits = 0;
+    const row = result;
     let kept = false;
     let rejectReason = '';
     if (row) {
-      if (minLikes > 0) {
+      if (row.video_url && !isRealVideoUrl(row.video_url)) row.video_url = '';
+      if (requireVideo && !row.video_url) {
+        rejectedNoVideo++; rejectReason = 'no video (image-only post)';
+      } else if (minLikes > 0) {
         const likes = parseLikes(row.likes_label);
         if (likes >= minLikes) { rows.push(row); kept = true; }
         else { rejectedLowLikes++; rejectReason = `<${minLikes} likes (${likes || 'unknown'})`; }
@@ -285,7 +340,9 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
       reason: rejectReason,
       kept: rows.length,
       want: target,
-      rejected: rejectedLowLikes,
+      rejected: rejectedLowLikes + rejectedNoVideo,
+      rejectedLowLikes,
+      rejectedNoVideo,
       csvSoFar: maybeSnap(),
     });
     await shouldPause();
@@ -293,7 +350,7 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   }
 
   await browser.close();
-  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, target };
+  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, rejectedNoVideo, rateLimitedAbort, target };
 }
 
 // ---- CLI ----
