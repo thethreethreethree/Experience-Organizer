@@ -199,12 +199,12 @@
       <div class="hint">Skip posts below this. Set <code>0</code> to disable.</div>
     </div>
     <div class="field" style="grid-column:span 1">
-      <label for="tfRequireVideo">Reels only</label>
+      <label for="tfImageOnly">Image posts only</label>
       <div style="display:flex;align-items:center;gap:8px;background:#0c0e12;border:1px solid var(--border);border-radius:8px;padding:9px 11px">
-        <input id="tfRequireVideo" type="checkbox" checked style="width:16px;height:16px;accent-color:#7b2cbf;cursor:pointer" />
-        <label for="tfRequireVideo" style="font-size:13px;color:var(--fg);cursor:pointer;margin:0">Skip image-only posts</label>
+        <input id="tfImageOnly" type="checkbox" checked style="width:16px;height:16px;accent-color:#06aed5;cursor:pointer" />
+        <label for="tfImageOnly" style="font-size:13px;color:var(--fg);cursor:pointer;margin:0">Skip Reels</label>
       </div>
-      <div class="hint">Require a real <code>video_url</code> (MP4/WebM/MOV).</div>
+      <div class="hint">IG videos use byte-range streaming - we can't extract playable URLs, so Reels ship empty <code>video_url</code>. Skip them unless that's OK.</div>
     </div>
     <div class="field">
       <label for="tfRegion">Region label</label>
@@ -1060,8 +1060,6 @@ function tfRenderStats(){
   if (!TF_ROWS.length) { el.innerHTML=''; return; }
   const verified = TF_ROWS.filter(r => String(r.verified).toLowerCase()==='true').length;
   const withLoc = TF_ROWS.filter(r => r.location_label).length;
-  const reels = TF_ROWS.filter(r => r.video_url).length;
-  const photos = TF_ROWS.length - reels;
   const uniqueAuthors = new Set(TF_ROWS.map(r => r.handle).filter(Boolean)).size;
   const missingHandle = TF_ROWS.filter(r => !r.handle).length;
   const warn = missingHandle
@@ -1069,8 +1067,6 @@ function tfRenderStats(){
     : '';
   el.innerHTML =
     `<div class="stat"><div class="n">${TF_ROWS.length}</div><div class="l">Posts collected</div></div>`+
-    `<div class="stat"><div class="n">${photos}</div><div class="l">Photos</div></div>`+
-    `<div class="stat"><div class="n" style="color:#7b2cbf">${reels}</div><div class="l">Reels</div></div>`+
     `<div class="stat"><div class="n">${uniqueAuthors}</div><div class="l">Unique creators</div></div>`+
     `<div class="stat" style="--c:#06aed5"><div class="n" style="color:#06aed5">${verified}</div><div class="l">Verified</div></div>`+
     `<div class="stat"><div class="n">${withLoc}</div><div class="l">With location</div></div>`+
@@ -1083,12 +1079,8 @@ function tfRenderGrid(){
   const view = TF_ROWS.slice().reverse();
   grid.innerHTML = view.map(r=>{
     const v = String(r.verified).toLowerCase()==='true';
-    const isVideo = !!r.video_url;
     const img = r.image_url
       ? `<img src="${escapeHTML(r.image_url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'" alt="">`
-      : '';
-    const videoBadge = isVideo
-      ? '<span class="vbadge" style="left:auto;right:8px;background:#7b2cbf;color:#fff">▶ Reel</span>'
       : '';
     const handle = escapeHTML(r.handle);
     const cap = escapeHTML(r.caption||'');
@@ -1100,7 +1092,7 @@ function tfRenderGrid(){
       ? `<a href="https://www.instagram.com/${handle}/" target="_blank" rel="noopener noreferrer">@${handle}</a>`
       : `<a href="${escapeHTML(r.ig_post_url)}" target="_blank" rel="noopener noreferrer" style="color:#ffb84d">(no handle — open post)</a>`;
     return `<div class="feedcard">
-      <div class="ph">${img}${v?'<span class="vbadge">✓ Verified</span>':''}${videoBadge}</div>
+      <div class="ph">${img}${v?'<span class="vbadge">✓ Verified</span>':''}</div>
       <div class="body">
         <div class="who">${who}</div>
         ${cap?`<div class="cap">${cap}</div>`:''}
@@ -1155,7 +1147,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
   const tags = document.getElementById('tfTags').value.trim();
   const count = parseInt(document.getElementById('tfCount').value, 10) || 100;
   const minLikes = Math.max(0, parseInt(document.getElementById('tfMinLikes').value, 10) || 0);
-  const requireVideo = document.getElementById('tfRequireVideo').checked;
+  const imageOnly = document.getElementById('tfImageOnly').checked;
   const region = document.getElementById('tfRegion').value.trim();
   const status = document.getElementById('tfStatus');
   if (!tags) { status.textContent = 'Add at least one hashtag (e.g. ELNIDO).'; return; }
@@ -1171,7 +1163,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
     const res = await fetch('/scrape-hashtag-stream', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ tags, count, minLikes, requireVideo, region }),
+      body: JSON.stringify({ tags, count, minLikes, imageOnly, region }),
     });
     if (!res.ok) throw new Error(await res.text());
     const reader = res.body.getReader(), dec = new TextDecoder();
@@ -1186,8 +1178,8 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
         let ev; try { ev = JSON.parse(line); } catch { continue; }
         if (ev.type === 'start'){
           const minNote = ev.minLikes ? `, min ${ev.minLikes.toLocaleString()} likes` : '';
-          const reelsNote = ev.requireVideo ? ', Reels only' : '';
-          tfProgPhase(`Discovering posts across ${ev.tags.length} hashtag(s) (target ${ev.count}${minNote}${reelsNote})…`);
+          const modeNote = ev.imageOnly ? ', images only' : '';
+          tfProgPhase(`Discovering posts across ${ev.tags.length} hashtag(s) (target ${ev.count}${minNote}${modeNote})…`);
         } else if (ev.type === 'discover'){
           tfProgPhase(`Discovering #${ev.tag} — ${ev.found} found`);
           status.textContent = `Scrolling #${ev.tag} grid… ${ev.found} post(s) queued.`;
@@ -1230,7 +1222,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
           }
           const parts = [];
           if (ev.rejectedLowLikes) parts.push(`${ev.rejectedLowLikes} below min-likes`);
-          if (ev.rejectedNoVideo) parts.push(`${ev.rejectedNoVideo} image-only`);
+          if (ev.rejectedReels) parts.push(`${ev.rejectedReels} Reels`);
           const rejNote = parts.length ? ` Skipped ${parts.join(', ')}.` : '';
           status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}).${rejNote} Total in CSV: ${TF_ROWS.length}.`;
         } else if (ev.type === 'error'){

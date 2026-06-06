@@ -217,11 +217,11 @@ const server = createServer(async (req, res) => {
           const tags = parseTags(payload.tags || '');
           const count = Math.max(1, Math.min(500, parseInt(payload.count, 10) || 100));
           const minLikes = Math.max(0, parseInt(payload.minLikes, 10) || 0);
-          const requireVideo = !!payload.requireVideo;
+          const imageOnly = !!payload.imageOnly;
           const region = (payload.region || '').trim();
           if (!tags.length) { send({ type: 'error', message: 'At least one hashtag is required.' }); res.end(); return; }
-          send({ type: 'start', tags, count, region, minLikes, requireVideo });
-          console.log(`Hashtag stream: #${tags.join(', #')} (target ${count}${minLikes ? `, min ${minLikes} likes` : ''}${requireVideo ? ', Reels only' : ''}${region ? `, region "${region}"` : ''})`);
+          send({ type: 'start', tags, count, region, minLikes, imageOnly });
+          console.log(`Hashtag stream: #${tags.join(', #')} (target ${count}${minLikes ? `, min ${minLikes} likes` : ''}${imageOnly ? ', images only' : ''}${region ? `, region "${region}"` : ''})`);
 
           // Reset snapshot so /dump-current reflects this run, not the previous CSV.
           LATEST_CSV_SNAPSHOT = '';
@@ -237,10 +237,10 @@ const server = createServer(async (req, res) => {
               if (ev.csvSoFar) LATEST_CSV_SNAPSHOT = ev.csvSoFar;
             }
             if (await shouldPause()) send({ type: 'resumed', from: 'hashtag' });
-          }, { shouldPause, minLikes, requireVideo });
+          }, { shouldPause, minLikes, imageOnly });
 
           LATEST_CSV_SNAPSHOT = result.csv;
-          send({ type: 'done', csv: result.csv, kept: result.kept, attempted: result.attempted, target: result.target, rejectedLowLikes: result.rejectedLowLikes || 0, rejectedNoVideo: result.rejectedNoVideo || 0 });
+          send({ type: 'done', csv: result.csv, kept: result.kept, attempted: result.attempted, target: result.target, rejectedLowLikes: result.rejectedLowLikes || 0, rejectedReels: result.rejectedReels || 0 });
         } catch (e) {
           console.error('Hashtag stream error:', e.message);
           send({ type: 'error', message: e.message });

@@ -182,13 +182,15 @@ async function fetchPost(page, href, regionLabel, captureCtx) {
         _handleSource: handleSource,
       };
     });
-    // Attach the network-captured video URL (if any). Set BEFORE the contract self-check
-    // in the main loop, which will then either keep it (real CDN URL) or coerce empty.
-    if (captureCtx) data.video_url = captureCtx.consume(href) || '';
+    // video_url is intentionally left empty - IG only serves video as byte-range fragments
+    // (e.g. bytestart=0&byteend=975) that aren't playable. The main loop reads the listener's
+    // hasVideo signal separately for the imageOnly filter.
 
     // Per-post diagnostic. Surfaces in the server console so we can see exactly which
     // signal each post yielded - critical for debugging when extraction starts missing.
-    console.log(`  post ${href}: handle=${data.handle || '(none)'} (from ${data._handleSource || '-'}) img=${data.image_url ? 'yes' : 'no'} vid=${data.video_url ? 'yes' : 'no'} cap=${(data.caption || '').length}ch likes=${data.likes_label || '-'} loc=${data.location_label || '-'}`);
+    // Note: the REEL/image classification is logged from the main loop after consumeHasVideo,
+    // not here - fetchPost can't reach the enrichHashtag-scope hasVideo map directly.
+    console.log(`  post ${href}: handle=${data.handle || '(none)'} (from ${data._handleSource || '-'}) img=${data.image_url ? 'yes' : 'no'} cap=${(data.caption || '').length}ch likes=${data.likes_label || '-'}`);
 
     // Accept the row if we have AT LEAST a handle or an image. A row missing both is
     // unusable; one with just an image is still useful (we'll tag the handle as unknown
@@ -225,13 +227,14 @@ async function fetchPost(page, href, regionLabel, captureCtx) {
 // opts.shouldPause: async () => boolean — blocks between posts when paused.
 // opts.minLikes: when > 0, only KEEP posts whose parsed likes meet/exceed this threshold.
 //   We over-scan discovery and cap total fetch attempts so a low-engagement hashtag can't loop forever.
-// opts.requireVideo: when true, only KEEP posts with a real video_url. Image-only posts are
-//   dropped at fetch time. Use this to produce a Reel-only feed where the importer can play
-//   each row inline.
+// opts.imageOnly: when true, drop Reels (posts with video) so the feed is image-only.
+//   IG's video URLs are byte-range-streamed fragments that aren't playable as standalone
+//   files, so a Reels-included scrape produces broken video_url cells. Image-only sidesteps
+//   the whole problem; video_url stays empty for every kept row.
 export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = {}) {
   const shouldPause = opts.shouldPause || (async () => false);
   const minLikes = Math.max(0, parseInt(opts.minLikes, 10) || 0);
-  const requireVideo = !!opts.requireVideo;
+  const imageOnly = !!opts.imageOnly;
   if (!CHROME) throw new Error('No Chrome/Edge found.');
   if (!existsSync(userDataDir)) throw new Error('Not logged in to Instagram. Click "Log in to Instagram" on the home page first.');
   const tagList = Array.isArray(tags) ? tags : parseTags(tags);
@@ -244,21 +247,20 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   const page = (await browser.pages())[0] || await browser.newPage();
   await page.setViewport({ width: 1280, height: 1100 });
 
-  // Network-intercept the real video CDN URL. IG never ships og:video and the DOM
-  // <video> element uses a blob: URL (MediaSource API), so neither static-meta nor
-  // DOM-walk can recover the underlying MP4. But on Reel page load IG fetches the
-  // file directly - status 200, content-type video/mp4, URL contains /o1/v/ - and
-  // we capture that here. capturedVideo[currentHref] is the first matching URL
-  // seen after navigation begins for that post.
-  const capturedVideo = Object.create(null);
+  // Video-presence detector. We don't try to CAPTURE the video URL anymore - IG
+  // streams video as byte-range fragments (e.g. bytestart=0&byteend=975) which aren't
+  // playable on their own, and reassembling them is brittle. Instead we just detect
+  // whether any video response fires during the post's page load, and use that
+  // boolean to filter Reels out when imageOnly is on.
+  const hasVideo = Object.create(null);
   let currentHref = null;
   page.on('response', (resp) => {
     if (!currentHref) return;
-    if (capturedVideo[currentHref]) return; // first hit wins
+    if (hasVideo[currentHref]) return; // already detected for this post
     const u = resp.url();
     const ct = resp.headers()['content-type'] || '';
-    const isVideo = /^video\//i.test(ct) || /\.(?:mp4|webm|mov)(?:\?|$)/i.test(u) || /\/o1\/v\//i.test(u);
-    if (isVideo && resp.status() === 200) capturedVideo[currentHref] = u;
+    const isVideo = /^video\//i.test(ct) || /\/o1\/v\//i.test(u);
+    if (isVideo && resp.status() === 200) hasVideo[currentHref] = true;
   });
 
   // Verify the saved session is still logged in. If sessionid is missing, bail loudly
@@ -276,11 +278,11 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   // need to queue 3-5x more URLs than the target to hit it.
   const target = Math.max(1, parseInt(want, 10) || 100);
   // Overscan multiplier: each filter narrows the qualifying set so we need more discovery to land
-  // the target. Rough empirical hits from #elnido: ~30% of posts have video, ~30% have ≥1000 likes,
-  // joint ~10%. Cap absolute count so a tiny hashtag doesn't spin forever.
+  // the target. Empirically on #elnido: ~50% of posts are images (the rest are Reels), ~30% have
+  // ≥1000 likes. Cap absolute count so a tiny hashtag doesn't spin forever.
   let overscanMult = 2;
   if (minLikes > 0) overscanMult *= minLikes >= 1000 ? 3 : 2;
-  if (requireVideo) overscanMult *= 3;
+  if (imageOnly) overscanMult *= 2;
   const overscan = Math.min(target * overscanMult, target + 400);
   const allHrefs = new Set();
   for (const tag of tagList) {
@@ -302,37 +304,33 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   const SNAP_EVERY = 5000;
   const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
 
-  // Pattern matching the Wondavu contract's self-check for video_url: ends in .mp4/.webm/.mov
-  // OR contains IG's known video CDN path /o1/v/. Anything else gets rejected so we never claim
-  // an image URL as a video.
-  const isRealVideoUrl = (u) => !!u && /^https?:\/\//.test(u) && (/\.(?:mp4|webm|mov)(?:\?|$)/i.test(u) || /scontent[.-][^/]*cdninstagram\.com\/(?:[^/]+\/)*o1\/v\//i.test(u));
-
   // Capture context handed to fetchPost so it can ask the page-level response listener
-  // for the video URL it intercepted during navigation. setHref tells the listener which
-  // post URLs to attribute to; consume reads + clears so straggler responses can't bleed.
+  // whether the post that just loaded was a Reel (any video response fired) or an image
+  // (none did). setHref tells the listener which post to attribute; consume reads + clears
+  // so straggler responses for the previous post can't bleed into the next.
   const captureCtx = {
     setHref: (h) => { currentHref = h; },
-    consume: (h) => { const u = capturedVideo[h]; delete capturedVideo[h]; return u; },
+    consumeHasVideo: (h) => { const v = !!hasVideo[h]; delete hasVideo[h]; return v; },
   };
 
   let rejectedLowLikes = 0;
-  let rejectedNoVideo = 0;
+  let rejectedReels = 0;
   let rateLimitHits = 0;
   for (let i = 0; i < hrefList.length && rows.length < target; i++) {
     const href = hrefList[i];
     const result = await fetchPost(page, href, regionLabel, captureCtx);
-    // A 429 is real and worth pausing for - but it's transient (the Constitution call:
-    // falsified the "persistent throttle" diagnosis with a direct curl that returned 200).
-    // So: long backoff and continue, no abort. The run reaches its natural end based on
-    // overscan + target; the rate-limit just slows the rate momentarily.
+    // A 429 is real and worth pausing for - but it's transient (Constitution: falsified
+    // the "persistent throttle" diagnosis with a direct curl that returned 200). So: long
+    // backoff and continue, no abort. The run reaches its natural end based on overscan +
+    // target; the rate-limit just slows the rate momentarily.
     if (result === RATE_LIMITED) {
       rateLimitHits++;
       if (onProgress) await onProgress({
         phase: 'fetch', i: i + 1, total: hrefList.length, name: href,
         ok: false, reason: 'HTTP 429 (will retry after backoff)',
         kept: rows.length, want: target,
-        rejected: rejectedLowLikes + rejectedNoVideo,
-        rejectedLowLikes, rejectedNoVideo, rateLimitHits,
+        rejected: rejectedLowLikes + rejectedReels,
+        rejectedLowLikes, rejectedReels, rateLimitHits,
       });
       await sleep(20000 + Math.floor(Math.random() * 10000));
       continue;
@@ -342,9 +340,11 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
     let kept = false;
     let rejectReason = '';
     if (row) {
-      if (row.video_url && !isRealVideoUrl(row.video_url)) row.video_url = '';
-      if (requireVideo && !row.video_url) {
-        rejectedNoVideo++; rejectReason = 'no video (image-only post)';
+      // Per row meta from the response listener. We never put the URL in video_url -
+      // it'd be a byte-range fragment, not playable. Image-only runs reject Reels here.
+      const wasReel = captureCtx.consumeHasVideo(href);
+      if (imageOnly && wasReel) {
+        rejectedReels++; rejectReason = 'Reel (image-only mode)';
       } else if (minLikes > 0) {
         const likes = parseLikes(row.likes_label);
         if (likes >= minLikes) { rows.push(row); kept = true; }
@@ -362,9 +362,9 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
       reason: rejectReason,
       kept: rows.length,
       want: target,
-      rejected: rejectedLowLikes + rejectedNoVideo,
+      rejected: rejectedLowLikes + rejectedReels,
       rejectedLowLikes,
-      rejectedNoVideo,
+      rejectedReels,
       csvSoFar: maybeSnap(),
     });
     await shouldPause();
@@ -372,7 +372,7 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   }
 
   await browser.close();
-  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, rejectedNoVideo, target };
+  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, rejectedReels, target };
 }
 
 // ---- CLI ----
