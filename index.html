@@ -1232,11 +1232,7 @@ document.getElementById('tfStart').addEventListener('click', async ()=>{
           if (ev.rejectedLowLikes) parts.push(`${ev.rejectedLowLikes} below min-likes`);
           if (ev.rejectedNoVideo) parts.push(`${ev.rejectedNoVideo} image-only`);
           const rejNote = parts.length ? ` Skipped ${parts.join(', ')}.` : '';
-          if (ev.rateLimitedAbort){
-            status.textContent = `⚠ Aborted: Instagram rate-limited your session (HTTP 429). Wait 1-24h, or use a different IG account, then retry. Collected ${ev.kept}/${ev.target} before throttle. Total in CSV: ${TF_ROWS.length}.`;
-          } else {
-            status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}).${rejNote} Total in CSV: ${TF_ROWS.length}.`;
-          }
+          status.textContent = `Done. Collected ${ev.kept}/${ev.target} target (visited ${ev.attempted}).${rejNote} Total in CSV: ${TF_ROWS.length}.`;
         } else if (ev.type === 'error'){
           throw new Error(ev.message || 'stream error');
         }

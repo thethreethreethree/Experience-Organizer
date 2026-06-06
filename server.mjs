@@ -240,7 +240,7 @@ const server = createServer(async (req, res) => {
           }, { shouldPause, minLikes, requireVideo });
 
           LATEST_CSV_SNAPSHOT = result.csv;
-          send({ type: 'done', csv: result.csv, kept: result.kept, attempted: result.attempted, target: result.target, rejectedLowLikes: result.rejectedLowLikes || 0, rejectedNoVideo: result.rejectedNoVideo || 0, rateLimitedAbort: !!result.rateLimitedAbort });
+          send({ type: 'done', csv: result.csv, kept: result.kept, attempted: result.attempted, target: result.target, rejectedLowLikes: result.rejectedLowLikes || 0, rejectedNoVideo: result.rejectedNoVideo || 0 });
         } catch (e) {
           console.error('Hashtag stream error:', e.message);
           send({ type: 'error', message: e.message });

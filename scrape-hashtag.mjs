@@ -85,10 +85,16 @@ const RATE_LIMITED = Symbol('rate-limited');
 // at domcontentloaded the article chrome hasn't rendered yet. We wait for the
 // <article> to appear, then read each field from MULTIPLE independent signals - the
 // static head metadata (og:title, og:image, JSON-LD) and the hydrated DOM.
-async function fetchPost(page, href, regionLabel) {
+async function fetchPost(page, href, regionLabel, captureCtx) {
   const url = `https://www.instagram.com${href}`;
+  // Tell the response listener which post to attribute video URLs to. Cleared after
+  // navigation completes so straggler responses for the next post don't contaminate.
+  if (captureCtx) captureCtx.setHref(href);
   try {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    // Give the Reel's auto-loaded video MP4 a moment to fire its response. Image posts
+    // produce no video response so this is the only delay either way.
+    await sleep(800);
     // Detect Chrome's HTTP 429 error page before wasting time on selectors.
     const landed = page.url();
     if (landed.startsWith('chrome-error://')) {
@@ -114,10 +120,9 @@ async function fetchPost(page, href, regionLabel) {
       const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
       const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
       const ogDesc  = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
-      const ogVideo = document.querySelector('meta[property="og:video"]')?.getAttribute('content')
-                   || document.querySelector('meta[property="og:video:secure_url"]')?.getAttribute('content')
-                   || document.querySelector('meta[property="og:video:url"]')?.getAttribute('content')
-                   || '';
+      // Note: IG ships empty og:video / og:video:secure_url on BOTH Reels and image posts,
+      // and the <video> element only exposes a blob: URL. The real video CDN URL is captured
+      // outside page.evaluate() via the response listener, attached below.
 
       // Handle: og:description's "- <handle> on <date>" pattern. IG ships this for every
       // public post. Allow digits/underscore/period but reject the "on" sentinel itself.
@@ -144,13 +149,9 @@ async function fetchPost(page, href, regionLabel) {
 
       // Image: og:image (always present on valid posts, including Reels - it's the cover frame).
       const image_url = ogImage;
-      // Video: og:video for Reels/clips. Falls back to a <video> element source in the article
-      // when IG ships the page without og:video (rare). Image posts leave this empty.
-      let video_url = ogVideo;
-      if (!video_url) {
-        const v = document.querySelector('article video, main video');
-        if (v) video_url = v.currentSrc || v.src || '';
-      }
+      // Video URL is supplied by the response-listener in the outer scope - we don't
+      // try to read it from the DOM here because IG only exposes a blob: URL.
+      const video_url = '';
 
       // Likes: first number-with-suffix in og:desc (it leads with "<N> likes, <M> comments").
       let likes_label = '';
@@ -178,10 +179,12 @@ async function fetchPost(page, href, regionLabel) {
         handle, caption, image_url, video_url, location_label, verified, likes_label,
         _hasOgImage: !!ogImage,
         _hasOgDesc: !!ogDesc,
-        _hasOgVideo: !!ogVideo,
         _handleSource: handleSource,
       };
     });
+    // Attach the network-captured video URL (if any). Set BEFORE the contract self-check
+    // in the main loop, which will then either keep it (real CDN URL) or coerce empty.
+    if (captureCtx) data.video_url = captureCtx.consume(href) || '';
 
     // Per-post diagnostic. Surfaces in the server console so we can see exactly which
     // signal each post yielded - critical for debugging when extraction starts missing.
@@ -241,6 +244,23 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   const page = (await browser.pages())[0] || await browser.newPage();
   await page.setViewport({ width: 1280, height: 1100 });
 
+  // Network-intercept the real video CDN URL. IG never ships og:video and the DOM
+  // <video> element uses a blob: URL (MediaSource API), so neither static-meta nor
+  // DOM-walk can recover the underlying MP4. But on Reel page load IG fetches the
+  // file directly - status 200, content-type video/mp4, URL contains /o1/v/ - and
+  // we capture that here. capturedVideo[currentHref] is the first matching URL
+  // seen after navigation begins for that post.
+  const capturedVideo = Object.create(null);
+  let currentHref = null;
+  page.on('response', (resp) => {
+    if (!currentHref) return;
+    if (capturedVideo[currentHref]) return; // first hit wins
+    const u = resp.url();
+    const ct = resp.headers()['content-type'] || '';
+    const isVideo = /^video\//i.test(ct) || /\.(?:mp4|webm|mov)(?:\?|$)/i.test(u) || /\/o1\/v\//i.test(u);
+    if (isVideo && resp.status() === 200) capturedVideo[currentHref] = u;
+  });
+
   // Verify the saved session is still logged in. If sessionid is missing, bail loudly
   // instead of silently scraping the logged-out (rate-limited) hashtag view.
   await page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 40000 });
@@ -287,31 +307,33 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   // an image URL as a video.
   const isRealVideoUrl = (u) => !!u && /^https?:\/\//.test(u) && (/\.(?:mp4|webm|mov)(?:\?|$)/i.test(u) || /scontent[.-][^/]*cdninstagram\.com\/(?:[^/]+\/)*o1\/v\//i.test(u));
 
+  // Capture context handed to fetchPost so it can ask the page-level response listener
+  // for the video URL it intercepted during navigation. setHref tells the listener which
+  // post URLs to attribute to; consume reads + clears so straggler responses can't bleed.
+  const captureCtx = {
+    setHref: (h) => { currentHref = h; },
+    consume: (h) => { const u = capturedVideo[h]; delete capturedVideo[h]; return u; },
+  };
+
   let rejectedLowLikes = 0;
   let rejectedNoVideo = 0;
   let rateLimitHits = 0;
-  let rateLimitedAbort = false;
   for (let i = 0; i < hrefList.length && rows.length < target; i++) {
     const href = hrefList[i];
-    const result = await fetchPost(page, href, regionLabel);
-    // Rate-limit detection: if IG returns HTTP 429 three times in a row, the session is
-    // throttled. Burning more attempts won't recover and just makes the throttle stick
-    // longer. Abort cleanly and tell the caller so the UI can show a helpful message.
+    const result = await fetchPost(page, href, regionLabel, captureCtx);
+    // A 429 is real and worth pausing for - but it's transient (the Constitution call:
+    // falsified the "persistent throttle" diagnosis with a direct curl that returned 200).
+    // So: long backoff and continue, no abort. The run reaches its natural end based on
+    // overscan + target; the rate-limit just slows the rate momentarily.
     if (result === RATE_LIMITED) {
       rateLimitHits++;
       if (onProgress) await onProgress({
         phase: 'fetch', i: i + 1, total: hrefList.length, name: href,
-        ok: false, reason: 'rate-limited (HTTP 429)',
+        ok: false, reason: 'HTTP 429 (will retry after backoff)',
         kept: rows.length, want: target,
         rejected: rejectedLowLikes + rejectedNoVideo,
         rejectedLowLikes, rejectedNoVideo, rateLimitHits,
       });
-      if (rateLimitHits >= 3) {
-        rateLimitedAbort = true;
-        console.log(`Rate-limit confirmed after ${rateLimitHits} consecutive 429s — aborting.`);
-        break;
-      }
-      // Long backoff to give the throttle a chance to lift before the next probe.
       await sleep(20000 + Math.floor(Math.random() * 10000));
       continue;
     }
@@ -350,7 +372,7 @@ export async function enrichHashtag(tags, want, regionLabel, onProgress, opts = 
   }
 
   await browser.close();
-  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, rejectedNoVideo, rateLimitedAbort, target };
+  return { csv: toCSV(rows), kept: rows.length, attempted: hrefList.length, rejectedLowLikes, rejectedNoVideo, target };
 }
 
 // ---- CLI ----
