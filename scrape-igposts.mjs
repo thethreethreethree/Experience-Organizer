@@ -44,7 +44,9 @@ export function hasIgSession() { return existsSync(userDataDir); }
 
 // Collect first-3 posts for each row with an IG handle. Reuses the saved login session.
 // Returns { csv, done, total, loggedIn }. If not logged in, returns the CSV unchanged.
-export async function enrichIgPosts(text, onProgress) {
+// opts.shouldPause: async () => boolean — blocks between rows when paused.
+export async function enrichIgPosts(text, onProgress, opts = {}) {
+  const shouldPause = opts.shouldPause || (async () => false);
   if (!CHROME) throw new Error('No Chrome/Edge found.');
   const rows = parseCSV(text);
   const headers = rows[0];
@@ -91,6 +93,11 @@ export async function enrichIgPosts(text, onProgress) {
   };
 
   let done = 0, total = 0;
+  // Snapshot throttling - on 5000-row datasets, serializing the full CSV every row
+  // crashes V8's heap. Only allocate the snapshot at most once every 5 seconds.
+  let lastSnap = 0;
+  const SNAP_EVERY = 5000;
+  const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.length <= igIdx) continue;
@@ -106,7 +113,8 @@ export async function enrichIgPosts(text, onProgress) {
       thumbs.slice(0, 6).forEach((src, k) => { r[idx['IG_Img_' + (k + 1)]] = src; });
       n = thumbs.length; if (n) done++;
     } catch {}
-    if (onProgress) onProgress(name, n);
+    if (onProgress) await onProgress(name, n, maybeSnap());
+    await shouldPause();
     await sleep(6000 + Math.floor(Math.random() * 3000));
   }
   await browser.close();

@@ -153,8 +153,11 @@ async function viaGoogle(name) {
 }
 
 // Enrich CSV text: fill empty Instagram cells. Returns { csv, filled, already, total }.
-// onProgress(name, handleOrEmpty, sawList) is called per row (optional).
-export async function enrichInstagram(text, onProgress) {
+// onProgress(name, handleOrEmpty, sawList, currentCsv) is called per row (optional).
+// opts.shouldPause: async () => boolean. Called between rows; if returns true,
+//   we BLOCK until it returns false. Used by server.mjs to pause/resume.
+export async function enrichInstagram(text, onProgress, opts = {}) {
+  const shouldPause = opts.shouldPause || (async () => false);
   const rows = parseCSV(text);
   const headers = rows[0];
   const igIdx = headers.indexOf('Instagram');
@@ -164,6 +167,11 @@ export async function enrichInstagram(text, onProgress) {
   if (igIdx < 0 || titleIdx < 0) throw new Error('CSV needs "Instagram" and "Title" columns');
   browser = null; page = null;
   let filled = 0, already = 0, total = 0;
+  // Snapshot throttling - serializing the whole CSV each row crashes V8 on 5000-row
+  // datasets. We only allocate the full snapshot at most once every 5 seconds.
+  let lastSnap = 0;
+  const SNAP_EVERY = 5000;
+  const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.length <= igIdx) continue;
@@ -186,7 +194,9 @@ export async function enrichInstagram(text, onProgress) {
     if (!h) { all.push(...await viaGoogle(name)); tryAccept(); }
 
     if (h) { r[igIdx] = igUrl(h); filled++; }
-    if (onProgress) onProgress(name, h, [...new Set(all)]);
+    if (onProgress) await onProgress(name, h, [...new Set(all)], maybeSnap());
+    // Block here if the server has been paused (server.mjs sets the flag).
+    await shouldPause();
     await sleep(3500 + Math.floor(Math.random() * 2000));
   }
   if (browser) { try { await browser.close(); } catch {} browser = null; page = null; }

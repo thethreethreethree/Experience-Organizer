@@ -37,7 +37,10 @@ const csvField = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v
 const toCSV = rows => rows.map(r => r.map(csvField).join(',')).join('\n');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Enrich CSV text -> { csv, filled, total }. onProgress(title, ok, idx, total) optional.
+// Enrich CSV text -> { csv, filled, total }.
+//   onProgress(title, ok, idx, total, csvSoFar) called per row (optional).
+//   The 5th arg `csvSoFar` is the serialized CSV of all rows so far - the server uses
+//   it to keep LATEST_CSV_SNAPSHOT current so /dump-current can return live state.
 export async function enrichCsv(text, onProgress) {
   const chromePath = findChrome();
   if (!chromePath) throw new Error('No Chrome/Edge found. Edit CHROME_CANDIDATES in scrape-photos.mjs.');
@@ -196,6 +199,12 @@ export async function enrichCsv(text, onProgress) {
 
   let filled = 0, kept = 0;
   const total = rows.length - 1;
+  // Snapshot throttling - generating the full CSV string per row on a 5000-row
+  // dataset blows up V8's heap (5000 * 3.6 MB allocations). We only serialize
+  // when at least 5s has passed since the last snapshot.
+  let lastSnap = 0;
+  const SNAP_EVERY = 5000;
+  const maybeSnap = () => { const now = Date.now(); if (now - lastSnap < SNAP_EVERY) return ''; lastSnap = now; return toCSV(rows); };
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.length <= linkIdx) continue;
@@ -205,14 +214,16 @@ export async function enrichCsv(text, onProgress) {
     if (isRealAlready(r[imgIdx])) {
       // Keep the existing photo - don't touch it.
       kept++; ok = true;
-      if (onProgress) onProgress(title, ok, i, total);
+      if (onProgress) onProgress(title, ok, i, total, maybeSnap());
       continue;
     }
     if (link) {
       const photo = await fetchPhoto(link);
       if (photo) { r[imgIdx] = photo; filled++; ok = true; }
     }
-    if (onProgress) onProgress(title, ok, i, total);
+    // Pass csvSoFar as 5th arg so the server can update its live snapshot.
+    // maybeSnap() throttles full-CSV allocation to once per 5s.
+    if (onProgress) onProgress(title, ok, i, total, maybeSnap());
     await sleep(700);
   }
   await browser.close();
