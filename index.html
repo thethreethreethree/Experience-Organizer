@@ -147,6 +147,11 @@
       <h3>Stays</h3>
       <p>Accommodation, grouped by <b>type</b> (Hostel / Hotel / Resort / B&amp;B / Guesthouse).</p>
     </div>
+    <div class="pick" data-view="general">
+      <div class="ico">🖼️</div>
+      <h3>General Content Fetch</h3>
+      <p>All places combined - <b>fetch photos in bulk</b> for any 18-col Wondavu CSV (hostels + hotels + restaurants + experiences together).</p>
+    </div>
     <div class="pick" data-tool="travelfeed">
       <div class="ico">📸</div>
       <h3>Travel Feed</h3>
@@ -418,6 +423,18 @@ function categorize(row){
 function parseRating(r){const n=parseFloat(r); return isNaN(n)?0:n;}
 function parseReviews(r){if(!r)return 0; const m=(''+r).replace(/[^\d]/g,''); return parseInt(m||'0',10);}
 
+// --- General Content Fetch: group by Industry column ---
+// Used by the "General Content Fetch" view, which combines all place types in one view
+// so photo fetching can run across the whole 18-col Wondavu CSV at once. Light
+// normalization merges near-duplicates like "Bed & breakfast" / "Bed and Breakfast" → "B&B".
+function industryOf(r){
+  const raw=(r['Industry']||'').trim();
+  if(!raw) return 'Other';
+  const t=raw.toLowerCase();
+  if(/bed.*breakfast|b ?& ?b/.test(t)) return 'B&B';
+  return raw;
+}
+
 // --- Stays categorization (by accommodation type) ---
 function categorizeStay(r){
   const t=norm((r['Title']||'')+' '+typeOf(r));
@@ -468,6 +485,11 @@ const VIEWS={
     label:'Restaurants', sub:'Restaurants - grouped by cuisine (auto-detected from your CSV)',
     csv:'data/restaurants.csv', classify:r=>cuisineOf(r), dynamic:true,
     groups:[], // built from the data on load
+  },
+  general:{
+    label:'General Content Fetch', sub:'All places combined - grouped by Industry. Fetch photos in bulk across an entire 18-col Wondavu CSV.',
+    csv:'', classify:r=>industryOf(r), dynamic:true,
+    groups:[], // built from the data on load (Hostel / Hotel / Restaurant / Experience / etc.)
   },
 };
 // Palette for dynamically-discovered categories (cuisines).
@@ -844,7 +866,9 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
     return;
   }
   // Guard 2: the CSV must actually have Google Maps Links to look photos up.
-  const linksCount=DATA.filter(r=>(r['Google Maps Link']||'').includes('google.com/maps')).length;
+  // Accept both legacy long-form URLs (www.google.com/maps/place/...) AND the short-form
+  // (maps.google.com/?q=lat,lng) that newer exports / the bad-photos CSV use.
+  const linksCount=DATA.filter(r=>/google\.com\/maps|maps\.google\.com/.test(r['Google Maps Link']||'')).length;
   console.log('[DCS] photoBtn: linksCount=', linksCount);
   if(linksCount===0){
     console.error('[DCS] photoBtn: no Google Maps Links found - aborting');
