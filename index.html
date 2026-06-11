@@ -879,25 +879,32 @@ document.getElementById('photoBtn').addEventListener('click',async()=>{
   status.textContent=`Launching Chrome and fetching photos for ${linksCount} places... this can take a few minutes (~2s each). Watch the server console for detail. Do NOT refresh.`;
   btn.disabled=true; btn.style.opacity='.6';
   progStart('Fetching photos…',`0 / ${linksCount}`);
-  // Live progress: poll /dump-current every 2s while the scrape runs. Each poll
-  // pulls the server's in-progress CSV snapshot; we count rows whose Image is a
-  // real photo URL, and update the bar + status. Stops when the POST returns.
+  // Live progress: poll /scrape-progress every 1s. The server updates LATEST_PROGRESS
+  // on every per-row callback so we see real iteration progress (rows processed) and
+  // the current row name - NOT just "rows that yielded a photo", which can stay flat
+  // for hours on CSVs the scraper can't extract from (coordinate-only Maps URLs etc.).
+  // The progress bar becomes determinate (fills proportionally) so "stuck" is
+  // visually distinct from "actively working".
   let stopPoll=false;
   (async()=>{
     while(!stopPoll){
       try{
-        const r=await fetch('/dump-current',{cache:'no-store'});
+        const r=await fetch('/scrape-progress',{cache:'no-store'});
         if(r.ok){
-          const text=await r.text();
-          if(text&&text.length>50){
-            const live=parseCSV(text);
-            const done=live.filter(row=>isRealPhoto(row['Image'])).length;
-            progPhase(`${done} / ${linksCount}`);
-            status.textContent=`Working… ${done} of ${linksCount} photos so far. (Live - the in-memory dataset is also being saved to data/_local_enrichment.partial.csv every 5s.)`;
+          const p=await r.json();
+          if(p && p.total){
+            const i=p.i||0, total=p.total, filled=p.filled||0;
+            // Determinate fill: width = i/total. Drop the indeterminate sliding gradient.
+            const bar=document.getElementById('progBar');
+            bar.classList.add('determinate');
+            bar.style.width=Math.max(2, Math.round(i/total*100))+'%';
+            progPhase(`${i} / ${total}  ·  ${filled} photo(s) found`);
+            const cur=p.currentName ? `Now: ${p.currentName}` : '';
+            status.textContent=`Working… processed ${i} of ${total}, ${filled} new photo(s) so far.  ${cur}`;
           }
         }
       }catch{}
-      await new Promise(r=>setTimeout(r,2000));
+      await new Promise(r=>setTimeout(r,1000));
     }
   })();
   try{

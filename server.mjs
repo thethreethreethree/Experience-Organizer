@@ -57,6 +57,13 @@ try {
   }
 } catch {}
 
+// Lightweight per-row progress signal updated on every scraper onProgress callback.
+// Lets the UI render a determinate progress bar + "X / Y" + current row name WITHOUT
+// re-parsing the whole CSV every poll. Critical for the General Content Fetch case
+// where most rows fail to yield a photo and the "isRealPhoto count" signal stays flat
+// even though the scraper is actively iterating.
+let LATEST_PROGRESS = null; // { phase, i, total, currentName, ok, filled, attempted, startedAt }
+
 const server = createServer(async (req, res) => {
   try {
     if (req.method === 'POST' && req.url === '/scrape') {
@@ -67,12 +74,18 @@ const server = createServer(async (req, res) => {
           console.log('Scrape request received - launching Chrome...');
           // Initialize live snapshot so /dump-current can serve progress immediately.
           LATEST_CSV_SNAPSHOT = body;
+          // Reset per-row progress so the UI doesn't show stale data from a previous run.
+          LATEST_PROGRESS = { phase: 'photos', i: 0, total: 0, currentName: '', ok: false, filled: 0, attempted: 0, startedAt: Date.now() };
+          let attempted = 0, filledLive = 0;
           const { csv, filled, total } = await enrichCsv(body, async (title, ok, i, tot, csvSoFar) => {
             console.log(`${ok ? '✓' : '·'} ${title}`);
+            attempted = i; if (ok) filledLive++;
+            LATEST_PROGRESS = { phase: 'photos', i, total: tot, currentName: title || '', ok: !!ok, filled: filledLive, attempted, startedAt: LATEST_PROGRESS.startedAt };
             if (csvSoFar) { LATEST_CSV_SNAPSHOT = csvSoFar; await partialSave(csvSoFar); }
           });
           LATEST_CSV_SNAPSHOT = csv;
           await partialSave(csv, true);
+          LATEST_PROGRESS = { phase: 'photos', i: total, total, currentName: 'Done', ok: true, filled, attempted: total, startedAt: LATEST_PROGRESS.startedAt, done: true };
           console.log(`Done: ${filled}/${total} photos.`);
           res.writeHead(200, { 'Content-Type': 'text/csv', 'X-Filled': String(filled), 'X-Total': String(total) });
           res.end(csv);
@@ -82,6 +95,14 @@ const server = createServer(async (req, res) => {
           res.end(e.message);
         }
       });
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/scrape-progress') {
+      // Lightweight per-row progress feed for the photo-fetch UI. Returns the latest
+      // {phase, i, total, currentName, ok, filled, attempted} object so the client can
+      // render a determinate bar + count + current row name on a 1s poll.
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify(LATEST_PROGRESS || {}));
       return;
     }
     if (req.method === 'POST' && req.url === '/ig-login') {
